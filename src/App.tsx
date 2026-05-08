@@ -533,7 +533,7 @@ function DashboardApp() {
   return (
     <main className="min-h-screen bg-muted/50">
       <div className="flex min-h-screen">
-        <aside className="hidden w-64 shrink-0 flex-col border-r bg-background p-5 lg:flex">
+        <aside className="hidden w-64 shrink-0 flex-col border-r bg-background p-5 lg:flex lg:sticky lg:top-0 lg:h-screen lg:self-start lg:overflow-y-auto">
           <div className="mb-6 flex items-center gap-2">
             <div className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
               <Home />
