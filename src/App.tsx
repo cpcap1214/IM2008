@@ -11,6 +11,7 @@ import {
   FilePenLine,
   Home,
   LayoutDashboard,
+  Package,
   PackageCheck,
   Pencil,
   Plus,
@@ -74,6 +75,7 @@ import { clearSampleData, seedSampleData } from "@/lib/seed"
 import { cn } from "@/lib/utils"
 import { ROLE_LABEL, usePreferences } from "@/hooks/usePreferences"
 import { SettingsDialog } from "@/components/SettingsDialog"
+import { AIAdvisorPanel } from "@/components/AIAdvisorPanel"
 import { Settings } from "lucide-react"
 
 const paymentMethodOptions: Array<{ value: OrderPaymentMethod; label: string }> = [
@@ -189,10 +191,6 @@ function summarizeItems(items: OrderItem[]) {
   const head = items[0].productName + (items[0].spec ? ` (${items[0].spec})` : "")
   if (items.length === 1) return head
   return `${head} 等 ${items.length} 樣`
-}
-
-function totalQuantity(items: OrderItem[]) {
-  return items.reduce((sum, item) => sum + item.quantity, 0)
 }
 
 function createDefaultForm(today: string): OrderFormData {
@@ -713,9 +711,12 @@ function DashboardApp() {
 
             {activeView === "alerts" ? (
               <AlertsView
-                reminders={reminders}
                 stalestUnpaid={dashboard.stalestUnpaid}
                 today={todayDate}
+                orders={orders}
+                products={products}
+                users={users}
+                onNavigate={(view) => setActiveView(view as ViewKey)}
               />
             ) : null}
           </div>
@@ -1208,7 +1209,7 @@ function EntryView({
                       <Input
                         value={row.productName}
                         onChange={(event) => updateItem(index, { productName: event.target.value })}
-                        placeholder="例如：富士蘋果"
+                        placeholder="例如：水泥"
                         required={index === 0}
                       />
                       {products.length > 0 ? (
@@ -1415,6 +1416,54 @@ function PaymentsView({
   )
 }
 
+type AggregatedItem = {
+  productName: string
+  spec: string
+  totalQuantity: number
+  orderCount: number
+  customers: string[]
+}
+
+function aggregatePendingItems(orders: OrderDoc[]): AggregatedItem[] {
+  const map = new Map<
+    string,
+    {
+      productName: string
+      spec: string
+      totalQuantity: number
+      orderIds: Set<string>
+      customers: Set<string>
+    }
+  >()
+
+  for (const order of orders) {
+    for (const item of order.items) {
+      const key = `${item.productName}||${item.spec}`
+      const existing = map.get(key) ?? {
+        productName: item.productName,
+        spec: item.spec,
+        totalQuantity: 0,
+        orderIds: new Set<string>(),
+        customers: new Set<string>(),
+      }
+      existing.totalQuantity += item.quantity
+      existing.orderIds.add(order.id)
+      existing.customers.add(order.customerName)
+      map.set(key, existing)
+    }
+  }
+
+  return Array.from(map.values())
+    .map((entry) => ({
+      productName: entry.productName,
+      spec: entry.spec,
+      totalQuantity: entry.totalQuantity,
+      orderCount: entry.orderIds.size,
+      customers: Array.from(entry.customers),
+    }))
+    .sort((a, b) => b.totalQuantity - a.totalQuantity)
+}
+
 function ShipmentsView({
   pendingShipments,
   drivers,
@@ -1431,50 +1480,175 @@ function ShipmentsView({
     return drivers.find((u) => u.id === driverId)?.displayName ?? driverId
   }
 
+  const aggregated = useMemo(() => aggregatePendingItems(pendingShipments), [pendingShipments])
+  const totalProductTypes = aggregated.length
+  const uniqueCustomers = useMemo(
+    () => new Set(pendingShipments.map((o) => o.customerName)).size,
+    [pendingShipments],
+  )
+
+  // FIFO 排序：愈早下單的愈優先出貨
+  const sortedOrders = useMemo(
+    () => [...pendingShipments].sort((a, b) => a.orderDate.getTime() - b.orderDate.getTime()),
+    [pendingShipments],
+  )
+
+  const today = useMemo(() => new Date(), [])
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>待出貨訂單</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>客戶</TableHead>
-              <TableHead>品項</TableHead>
-              <TableHead>數量</TableHead>
-              <TableHead>下單日</TableHead>
-              <TableHead>司機</TableHead>
-              <TableHead>收款狀態</TableHead>
-              <TableHead className="text-right">操作</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {pendingShipments.length === 0 ? (
-              <EmptyRow colSpan={7} text="目前沒有待出貨訂單。" />
-            ) : (
-              pendingShipments.map((order) => (
-                <TableRow key={order.id}>
-                  <TableCell className="font-medium">{order.customerName}</TableCell>
-                  <TableCell>{summarizeItems(order.items)}</TableCell>
-                  <TableCell>{totalQuantity(order.items)}</TableCell>
-                  <TableCell>{formatDate(order.orderDate)}</TableCell>
-                  <TableCell>{driverName(order.driverId)}</TableCell>
-                  <TableCell>
-                    <StatusBadge tone={order.paymentStatus === "paid" ? "default" : "muted"}>
-                      {order.paymentStatus === "paid" ? "已結清" : "未收款"}
-                    </StatusBadge>
-                  </TableCell>
-                  <TableCell>
-                    <RowActions order={order} onEdit={onEdit} onDelete={onDelete} />
-                  </TableCell>
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
-      </CardContent>
-    </Card>
+    <div className="flex flex-col gap-5">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Package />
+            待備商品總覽
+          </CardTitle>
+          <CardAction>
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+              <Badge variant="secondary">
+                {pendingShipments.length} 筆訂單
+              </Badge>
+              <Badge variant="secondary">{uniqueCustomers} 位客戶</Badge>
+              <Badge variant="secondary">{totalProductTypes} 樣商品</Badge>
+            </div>
+          </CardAction>
+        </CardHeader>
+        <CardContent>
+          {aggregated.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 py-10 text-center">
+              <div className="flex size-12 items-center justify-center rounded-full bg-chart-1/10 text-chart-1">
+                <CheckCircle2 />
+              </div>
+              <p className="font-medium">目前沒有待備商品</p>
+              <p className="text-sm text-muted-foreground">所有訂單都已安排出貨</p>
+            </div>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {aggregated.map((item) => (
+                <div
+                  key={`${item.productName}-${item.spec}`}
+                  className="flex flex-col gap-2 rounded-lg border bg-muted/30 p-3 transition-colors hover:bg-muted/50"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-medium leading-tight">{item.productName}</div>
+                      {item.spec ? (
+                        <div className="truncate text-xs text-muted-foreground">{item.spec}</div>
+                      ) : null}
+                    </div>
+                    <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                      <Package className="size-4" />
+                    </div>
+                  </div>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-3xl font-bold tabular-nums leading-none">
+                      {numberFormatter.format(item.totalQuantity)}
+                    </span>
+                    <span className="text-xs text-muted-foreground">件 / 套</span>
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {item.orderCount} 筆訂單　·
+                    {item.customers.slice(0, 2).join("、")}
+                    {item.customers.length > 2 ? ` 等 ${item.customers.length} 位` : ""}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Truck />
+            訂單明細
+          </CardTitle>
+          <CardAction>
+            <span className="text-xs text-muted-foreground">依下單時間排序（最舊優先）</span>
+          </CardAction>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-[140px]">客戶</TableHead>
+                <TableHead>訂單品項</TableHead>
+                <TableHead className="text-right">訂單金額</TableHead>
+                <TableHead>下單日</TableHead>
+                <TableHead>司機</TableHead>
+                <TableHead>收款</TableHead>
+                <TableHead className="text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {sortedOrders.length === 0 ? (
+                <EmptyRow colSpan={7} text="目前沒有待出貨訂單。" />
+              ) : (
+                sortedOrders.map((order) => {
+                  const waited = daysBetween(today, order.orderDate)
+                  const urgent = waited >= 7
+                  return (
+                    <TableRow key={order.id} className="align-top">
+                      <TableCell className="py-3 font-medium">{order.customerName}</TableCell>
+                      <TableCell className="py-3">
+                        <div className="flex flex-col gap-1">
+                          {order.items.length === 0 ? (
+                            <span className="text-muted-foreground">-</span>
+                          ) : (
+                            order.items.map((item, index) => (
+                              <div
+                                key={`${order.id}-${index}`}
+                                className="flex items-center gap-2 text-sm"
+                              >
+                                <span className="font-medium">{item.productName}</span>
+                                {item.spec ? (
+                                  <span className="text-xs text-muted-foreground">
+                                    {item.spec}
+                                  </span>
+                                ) : null}
+                                <span className="ml-auto whitespace-nowrap rounded bg-muted px-1.5 py-0.5 text-xs font-semibold tabular-nums">
+                                  × {item.quantity}
+                                </span>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="py-3 text-right font-medium tabular-nums">
+                        {money(order.totalAmount)}
+                      </TableCell>
+                      <TableCell className="py-3">
+                        <div className="flex flex-col gap-0.5">
+                          <span>{formatDate(order.orderDate)}</span>
+                          <span
+                            className={cn(
+                              "text-xs",
+                              urgent ? "font-medium text-destructive" : "text-muted-foreground",
+                            )}
+                          >
+                            {waited === 0 ? "今日" : `已等 ${waited} 天`}
+                          </span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="py-3">{driverName(order.driverId)}</TableCell>
+                      <TableCell className="py-3">
+                        <StatusBadge tone={order.paymentStatus === "paid" ? "default" : "muted"}>
+                          {order.paymentStatus === "paid" ? "已結清" : "未收款"}
+                        </StatusBadge>
+                      </TableCell>
+                      <TableCell className="py-3">
+                        <RowActions order={order} onEdit={onEdit} onDelete={onDelete} />
+                      </TableCell>
+                    </TableRow>
+                  )
+                })
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+    </div>
   )
 }
 
@@ -1551,33 +1725,33 @@ function AnalyticsView({
 }
 
 function AlertsView({
-  reminders,
   stalestUnpaid,
   today,
+  orders,
+  products,
+  users,
+  onNavigate,
 }: {
-  reminders: string[]
   stalestUnpaid: OrderDoc[]
   today: Date
+  orders: OrderDoc[]
+  products: ProductDoc[]
+  users: UserDoc[]
+  onNavigate: (view: string) => void
 }) {
   return (
-    <div className="grid gap-5 xl:grid-cols-[0.8fr_1.2fr]">
-      <Card>
-        <CardHeader>
-          <CardTitle>智慧提醒</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-2">
-          {reminders.map((reminder) => (
-            <div key={reminder} className="flex items-start gap-2.5 text-sm leading-6">
-              <Sparkles />
-              <span>{reminder}</span>
-            </div>
-          ))}
-        </CardContent>
-      </Card>
+    <div className="flex flex-col gap-5">
+      <AIAdvisorPanel
+        orders={orders}
+        products={products}
+        users={users}
+        today={today}
+        onNavigate={(view) => onNavigate(view)}
+      />
 
       <Card>
         <CardHeader>
-          <CardTitle>久未收款</CardTitle>
+          <CardTitle>久未收款明細</CardTitle>
         </CardHeader>
         <CardContent>
           <Table>

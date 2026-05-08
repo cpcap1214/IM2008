@@ -1,6 +1,6 @@
 # 堯順工程行智慧儀表板
 
-> 內部管理工具：訂單建立、出貨追蹤、收款管理、本月營運分析。
+> 內部管理工具：訂單建立、出貨追蹤、收款管理、本月營運分析、AI 智慧顧問。
 > 後端用 Firebase Firestore 即時同步，可由 LINE Bot / 多個前端裝置同步寫入。
 
 ---
@@ -14,6 +14,7 @@
 | UI 系統 | Tailwind CSS v4 + shadcn/ui (Base UI) |
 | 圖示 | Lucide |
 | 雲端資料 | Firebase Firestore (即時訂閱) |
+| AI 顧問 | Google Gemini 2.5 Flash（可選），規則引擎 fallback |
 | 字體 | Geist Variable |
 
 ---
@@ -34,22 +35,33 @@ npm install
 2. **複製 firebaseConfig**：註冊完會出現一段 JS 設定，6 個值要保留
 3. **啟用 Firestore**：左側選單 → Firestore Database → 「建立資料庫」→ 選 `asia-east1` → 選**測試模式**
 
-### 3. 環境變數
+### 3. （可選）設定 Gemini AI
 
-複製 `.env.example` 為 `.env.local`，填入 Firebase Console 拿到的值：
+到 [Google AI Studio](https://aistudio.google.com/apikey) 建立 API key（免費額度每天 1500+ 次）。
+
+⚠️ `VITE_*` 變數會被打包進前端 bundle = **公開資訊**。上線前請去 Google AI Studio / Cloud Console 把 key 鎖定 HTTP referrer 和 API 範圍。
+
+### 4. 環境變數
+
+複製 `.env.example` 為 `.env.local`，填入設定值：
 
 ```env
+# Firebase（必填）
 VITE_FIREBASE_API_KEY=AIzaSy...
 VITE_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
 VITE_FIREBASE_PROJECT_ID=your-project
 VITE_FIREBASE_STORAGE_BUCKET=your-project.firebasestorage.app
 VITE_FIREBASE_MESSAGING_SENDER_ID=...
 VITE_FIREBASE_APP_ID=1:...:web:...
+
+# Gemini AI（可選，留空會自動 fallback 到本地規則引擎）
+VITE_GEMINI_API_KEY=AIzaSy...
+VITE_GEMINI_MODEL=gemini-2.5-flash
 ```
 
 > `.env.local` 已被 `.gitignore` 排除，不會推上 GitHub。
 
-### 4. 啟動開發伺服器
+### 5. 啟動開發伺服器
 
 ```bash
 npm run dev
@@ -57,7 +69,9 @@ npm run dev
 
 打開 http://localhost:5173 即可看到儀表板。
 
-### 5. 灌範例資料（首次啟動建議）
+> 修改 `.env.local` 後一定要 **重啟** dev server，Vite 只在啟動時讀 env。
+
+### 6. 灌範例資料（首次啟動建議）
 
 兩種方式擇一：
 
@@ -165,11 +179,13 @@ src/
 ├── main.tsx                      # entry，包 PreferencesProvider
 ├── index.css                     # Tailwind v4 + 主題 token
 ├── components/
+│   ├── AIAdvisorPanel.tsx        # AI 智慧建議面板（含 24h 快取）
 │   ├── SettingsDialog.tsx        # 個人資料 / 外觀 / 偏好設定
 │   └── ui/                       # shadcn 基礎元件
 ├── hooks/
 │   └── usePreferences.tsx        # 偏好設定 (主題/字體/強調色) + Provider
 ├── lib/
+│   ├── aiAdvisor.ts              # AI 顧問：Gemini call + 規則引擎 + 快取
 │   ├── firebase.ts               # Firebase init (env 驅動)
 │   ├── firestore.ts              # collection 訂閱、CRUD、type converter
 │   ├── seed.ts                   # 範例資料寫入 / 清除（瀏覽器版）
@@ -187,7 +203,57 @@ scripts/
 | 帳款 | 未收款訂單追蹤，含距今天數、出貨狀態 |
 | 出貨 | 待出貨訂單清單，依下單時間排序 |
 | 分析 | 已收款付款方式百分比、訂單狀態分佈 |
-| 提醒 | 久未收款提醒（>7 天）、逾期客戶分析 |
+| 提醒 | **AI 智慧建議**（Gemini 或規則引擎）、久未收款明細表 |
+
+---
+
+## AI 智慧建議
+
+「提醒」分頁的核心功能。系統會分析 Firestore 內的訂單、客戶、商品資料，給出 3-7 條客製化營運建議。
+
+### 雙引擎切換
+
+面板右上角可切換：
+
+| Provider | 條件 | 行為 |
+|---|---|---|
+| **Google Gemini** | `VITE_GEMINI_API_KEY` 已設定 | 真 LLM 分析，回傳結構化 JSON |
+| **規則引擎** | 永遠可用 | 內建 13 條規則，本地秒回，零成本 |
+
+任一 provider 失敗會自動 fallback 到規則引擎，不會白屏。
+
+### 建議分類
+
+| 嚴重度 | 顏色 | 適用情境 |
+|---|---|---|
+| 🚨 critical | 紅 | 金額大或時間久的緊急問題（如 30 天未收且 > 5 萬） |
+| ⚠️ warning | 琥珀 | 需要注意的趨勢（收款率偏低、待出貨堆積） |
+| ℹ️ info | 青 | 觀察類洞察（高頻客戶、商品占比、沉睡客戶） |
+| ✅ positive | 綠 | 正向訊號（收款健康、營收成長） |
+
+### 24 小時快取機制
+
+| 觸發時機 | 行為 |
+|---|---|
+| 第一次掛載 / 切換 provider | 先讀 localStorage 快取，<24h 直接用、>24h 才呼叫 API |
+| 切回提醒分頁 | 讀快取 → 不呼叫 API |
+| Firestore 資料變動 | **不會自動觸發**（避免燒額度） |
+| 點「重新分析」按鈕 | 強制呼叫 API、覆蓋快取、24 小時計時器歸零 |
+
+效果：每天進站第一次自動更新一次，其他時間都用快取，Gemini 免費額度可永遠用不完。
+
+兩個 provider 的快取分開存（key: `aiAdvisor:cache:gemini` / `aiAdvisor:cache:rules`），切換 provider 不會誤刪。
+
+### 接其他 AI Provider
+
+[src/lib/aiAdvisor.ts](src/lib/aiAdvisor.ts) 已預留 `openai` / `claude` 的 enum 與 dispatch 點：
+
+```ts
+if (provider === "gemini") suggestions = await callGemini(...)
+// TODO: callOpenAI / callClaude 之後再補
+```
+
+要接 OpenAI 或 Claude 只要實作對應 `callXXX` 函式並補進 dispatch，UI 會自動顯示對應的 provider label。
 
 ---
 
@@ -237,11 +303,13 @@ firebase init hosting    # 選 dist 為 public 目錄、選 SPA 改寫
 firebase deploy
 ```
 
-**其他選項**：Vercel / Netlify / Cloudflare Pages 任一靜態 hosting 都可。記得在 hosting 平台設定環境變數（同 `.env.local` 的 6 個 `VITE_FIREBASE_*`）。
+**其他選項**：Vercel / Netlify / Cloudflare Pages 任一靜態 hosting 都可。記得在 hosting 平台設定環境變數（同 `.env.local` 的所有 `VITE_*`）。
 
 ---
 
 ## 安全規則建議（上線前必改）
+
+### Firestore 規則
 
 預設「測試模式」30 天後會關閉所有寫入。正式環境建議改為：
 
@@ -270,6 +338,17 @@ service cloud.firestore {
 
 > 啟用認證並設 custom claim `role` 後再切到此規則。
 
+### Gemini API Key 限制
+
+到 [Google AI Studio](https://aistudio.google.com/apikey) → 編輯你的 key：
+
+1. **Application restrictions** 選 `HTTP referrers`，加入允許的網域：
+   - `http://localhost/*`（開發）
+   - 你的正式網域（如 `https://yaoshun.web.app/*`）
+2. **API restrictions** 勾 `Restrict key`，只啟用 `Generative Language API`
+
+這樣 key 就算被人扒走，他在自己的網域也用不了。
+
 ---
 
 ## 後續路線圖
@@ -279,3 +358,5 @@ service cloud.firestore {
 - [ ] LINE Notify Webhook：未收款 / 待出貨提醒
 - [ ] 對帳報表 CSV 匯出
 - [ ] Firebase Auth + 上述 Firestore 安全規則
+- [ ] 接 OpenAI / Claude 作為備援 AI provider
+- [ ] AI 建議的點讚/採納回饋機制（用來迭代 prompt）
