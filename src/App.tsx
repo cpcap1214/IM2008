@@ -76,6 +76,7 @@ import { cn } from "@/lib/utils"
 import { ROLE_LABEL, usePreferences } from "@/hooks/usePreferences"
 import { SettingsDialog } from "@/components/SettingsDialog"
 import { AIAdvisorPanel } from "@/components/AIAdvisorPanel"
+import { ExportBar, type ExportColumn } from "@/components/ExportBar"
 import { Settings } from "lucide-react"
 
 const paymentMethodOptions: Array<{ value: OrderPaymentMethod; label: string }> = [
@@ -686,6 +687,7 @@ function DashboardApp() {
             {activeView === "payments" ? (
               <PaymentsView
                 unpaidOrders={dashboard.unpaidOrders}
+                drivers={drivers}
                 today={todayDate}
                 onEdit={editOrder}
                 onDelete={removeOrder}
@@ -1355,21 +1357,62 @@ function EntryView({
 
 function PaymentsView({
   unpaidOrders,
+  drivers,
   today,
   onEdit,
   onDelete,
 }: {
   unpaidOrders: OrderDoc[]
+  drivers: UserDoc[]
   today: Date
   onEdit: (order: OrderDoc) => void
   onDelete: (id: string) => void
 }) {
+  const driverName = (driverId: string | null) => {
+    if (!driverId) return "未指派"
+    return drivers.find((u) => u.id === driverId)?.displayName ?? driverId
+  }
+  const paymentMethodLabel = (method: OrderPaymentMethod | null) =>
+    paymentMethodOptions.find((opt) => opt.value === method)?.label ?? ""
+
+  const exportColumns: ExportColumn<OrderDoc>[] = [
+    { key: "customer", label: "客戶", getValue: (o) => o.customerName },
+    { key: "items", label: "訂單品項", getValue: (o) => summarizeItems(o.items) },
+    { key: "amount", label: "訂單金額", getValue: (o) => o.totalAmount },
+    { key: "orderDate", label: "下單日", getValue: (o) => o.orderDate },
+    { key: "driver", label: "司機", getValue: (o) => driverName(o.driverId) },
+    {
+      key: "paymentStatus",
+      label: "收款",
+      getValue: (o) => o.paymentStatus,
+      formatText: (o) => (o.paymentStatus === "paid" ? "已結清" : "未收款"),
+    },
+    {
+      key: "paymentMethod",
+      label: "付款方式",
+      getValue: (o) => paymentMethodLabel(o.paymentMethod),
+      defaultSelected: false,
+    },
+    {
+      key: "deliveryStatus",
+      label: "出貨狀態",
+      getValue: (o) => (o.deliveryDate ? "已出貨" : "未出貨"),
+      defaultSelected: false,
+    },
+  ]
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>未收款追蹤</CardTitle>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-4">
+        <ExportBar
+          rows={unpaidOrders}
+          columns={exportColumns}
+          filename="未收款追蹤"
+          title="未收款追蹤"
+        />
         <Table>
           <TableHeader>
             <TableRow>
@@ -1495,6 +1538,26 @@ function ShipmentsView({
 
   const today = useMemo(() => new Date(), [])
 
+  const exportColumns: ExportColumn<OrderDoc>[] = [
+    { key: "customer", label: "客戶", getValue: (o) => o.customerName },
+    { key: "items", label: "訂單品項", getValue: (o) => summarizeItems(o.items) },
+    { key: "amount", label: "訂單金額", getValue: (o) => o.totalAmount },
+    { key: "orderDate", label: "下單日", getValue: (o) => o.orderDate },
+    { key: "driver", label: "司機", getValue: (o) => driverName(o.driverId) },
+    {
+      key: "paymentStatus",
+      label: "收款",
+      getValue: (o) => o.paymentStatus,
+      formatText: (o) => (o.paymentStatus === "paid" ? "已結清" : "未收款"),
+    },
+    {
+      key: "waited",
+      label: "等候天數",
+      getValue: (o) => daysBetween(today, o.orderDate),
+      defaultSelected: false,
+    },
+  ]
+
   return (
     <div className="flex flex-col gap-5">
       <Card>
@@ -1568,7 +1631,13 @@ function ShipmentsView({
             <span className="text-xs text-muted-foreground">依下單時間排序（最舊優先）</span>
           </CardAction>
         </CardHeader>
-        <CardContent>
+        <CardContent className="flex flex-col gap-4">
+          <ExportBar
+            rows={sortedOrders}
+            columns={exportColumns}
+            filename="待出貨訂單"
+            title="待出貨訂單"
+          />
           <Table>
             <TableHeader>
               <TableRow>
