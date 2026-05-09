@@ -15,6 +15,7 @@
 | 圖示 | Lucide |
 | 雲端資料 | Firebase Firestore (即時訂閱) |
 | AI 顧問 | Google Gemini 2.5 Flash（可選），規則引擎 fallback |
+| 資料匯出 | xlsx (SheetJS) + 原生 Blob / `window.print()` |
 | 字體 | Geist Variable |
 
 ---
@@ -200,9 +201,9 @@ scripts/
 |---|---|
 | 總覽 | 8 顆 KPI、付款方式圓環圖、近期訂單、智慧提醒、訂單狀態統計 |
 | 填寫資料 | 訂單表單，支援多品項陣列、Products 下拉自動帶入價格 |
-| 帳款 | 未收款訂單追蹤，含距今天數、出貨狀態 |
-| 出貨 | 待出貨訂單清單，依下單時間排序 |
-| 分析 | 已收款付款方式百分比、訂單狀態分佈 |
+| 帳款 | 未收款訂單追蹤，含距今天數、出貨狀態，支援匯出 CSV / Excel、列印 PDF |
+| 出貨 | 待出貨訂單清單，依下單時間排序，支援匯出 CSV / Excel、列印 PDF |
+| 分析 | 已收款付款方式百分比、訂單狀態分佈，支援匯出 CSV / Excel、列印 PDF |
 | 提醒 | **AI 智慧建議**（Gemini 或規則引擎）、久未收款明細表 |
 
 ---
@@ -254,6 +255,32 @@ if (provider === "gemini") suggestions = await callGemini(...)
 ```
 
 要接 OpenAI 或 Claude 只要實作對應 `callXXX` 函式並補進 dispatch，UI 會自動顯示對應的 provider label。
+
+---
+
+## 資料匯出
+
+「帳款 / 出貨 / 分析」三個視圖頂端皆有 **匯出列**（[ExportBar](src/components/ExportBar.tsx)），可勾選欄位後產出三種格式：
+
+| 格式 | 實作 | 行為 |
+|---|---|---|
+| **CSV** | 原生 Blob + UTF-8 BOM | 直接下載 `.csv`，Excel 開啟不亂碼 |
+| **Excel** | [xlsx (SheetJS)](https://www.npmjs.com/package/xlsx) `aoa_to_sheet` + `writeFile` | 直接下載 `.xlsx`，數值 / 日期保留原始型別 |
+| **PDF** | `window.open()` + `window.print()` | 開新視窗自動觸發列印，使用者選「另存 PDF」即可 |
+
+### 操作流程
+
+1. 進入「帳款 / 出貨 / 分析」任一視圖
+2. 在匯出列勾選要匯出的欄位（可全選 / 清除）
+3. 點「匯出 CSV」/「匯出 Excel」/「列印 PDF」
+
+### 檔名規則
+
+下載檔名格式為 `{filename}_YYYYMMDD.{ext}`，例：`unpaid_orders_20260509.xlsx`。
+
+### 列印樣式
+
+PDF 列印頁會帶標題、列印時間戳、總筆數，表格採斑馬紋，`@media print` 自動裁掉按鈕，列印後關閉視窗即可。
 
 ---
 
@@ -356,7 +383,7 @@ service cloud.firestore {
 - [ ] LINE Login 整合，使用者首次登入自動寫入 Users
 - [ ] LIFF 表單給客戶下單（讀 Products、寫 Orders）
 - [ ] LINE Notify Webhook：未收款 / 待出貨提醒
-- [ ] 對帳報表 CSV 匯出
+- [x] 對帳報表 CSV / Excel / PDF 匯出（帳款・出貨・分析三視圖）
 - [ ] Firebase Auth + 上述 Firestore 安全規則
 - [ ] 接 OpenAI / Claude 作為備援 AI provider
 - [ ] AI 建議的點讚/採納回饋機制（用來迭代 prompt）
