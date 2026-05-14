@@ -85,6 +85,12 @@ import {
   type UserDoc,
 } from "@/lib/firestore"
 import { withWriteFeedback } from "@/lib/mutations"
+import {
+  hasExactMatch,
+  nearMatchSuggestions,
+  rankCustomers,
+  type CustomerSuggestion,
+} from "@/lib/customerSearch"
 import { clearSampleData, isSeedEnabled, seedSampleData } from "@/lib/seed"
 import { cn } from "@/lib/utils"
 import { ROLE_LABEL, usePreferences } from "@/hooks/usePreferences"
@@ -299,6 +305,30 @@ function DashboardApp() {
 
   const customers = useMemo(() => users.filter((u) => u.role === "customer"), [users])
   const activeProducts = useMemo(() => products.filter((p) => p.isActive), [products])
+
+  // Unified pool for the customer-name fuzzy picker. Users docs are the
+  // primary source; we also fold in distinct customerName values from
+  // existing orders so "ghost" customers (orders without a Users doc) still
+  // surface in autocomplete and the near-match warning. Keyed by normalized
+  // name to dedupe across the two sources.
+  const customerSuggestions = useMemo<CustomerSuggestion[]>(() => {
+    const byKey = new Map<string, CustomerSuggestion>()
+    for (const u of customers) {
+      const name = u.displayName.trim()
+      if (!name) continue
+      const key = name.toLocaleLowerCase().replace(/\s+/g, "")
+      if (!byKey.has(key)) byKey.set(key, { name, id: u.id })
+    }
+    for (const o of orders) {
+      const name = o.customerName.trim()
+      if (!name) continue
+      const key = name.toLocaleLowerCase().replace(/\s+/g, "")
+      if (!byKey.has(key)) byKey.set(key, { name, id: o.customerId || null })
+    }
+    return Array.from(byKey.values()).sort((a, b) =>
+      a.name.localeCompare(b.name, "zh-Hant"),
+    )
+  }, [customers, orders])
 
   // Autocomplete pool for the free-text "送貨人員" field — distinct non-empty
   // driverId values from existing orders so the boss can quickly re-use names.
@@ -757,6 +787,7 @@ function DashboardApp() {
                 submitOrder={submitOrder}
                 resetForm={resetForm}
                 customers={customers}
+                customerSuggestions={customerSuggestions}
                 driverLabelOptions={driverLabelSuggestions}
                 products={activeProducts}
                 busy={busy}
@@ -1328,6 +1359,120 @@ function OverviewView({
   )
 }
 
+function CustomerCombobox({
+  value,
+  onValueChange,
+  onPick,
+  suggestions,
+  required,
+  placeholder,
+}: {
+  value: string
+  onValueChange: (next: string) => void
+  onPick: (suggestion: CustomerSuggestion) => void
+  suggestions: CustomerSuggestion[]
+  required?: boolean
+  placeholder?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const ranked = useMemo(
+    () => rankCustomers(value, suggestions).slice(0, 6),
+    [value, suggestions],
+  )
+  const exact = useMemo(() => hasExactMatch(value, suggestions), [value, suggestions])
+  const nearMatches = useMemo(
+    () => nearMatchSuggestions(value, suggestions),
+    [value, suggestions],
+  )
+  const trimmed = value.trim()
+  const showDropdown = open && trimmed.length > 0 && ranked.length > 0
+  // Tells the boss "you're entering a brand-new name" only when their input
+  // is sufficiently long AND doesn't even fuzzy-match anything — avoids
+  // flashing the "new customer" hint on every keystroke.
+  const showNewHint =
+    !exact && nearMatches.length === 0 && trimmed.length >= 2 && suggestions.length > 0
+
+  return (
+    <div className="relative">
+      <Input
+        value={value}
+        onChange={(event) => {
+          onValueChange(event.target.value)
+          setOpen(true)
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => {
+          // Delay so clicks on dropdown items register before the input blurs.
+          window.setTimeout(() => setOpen(false), 150)
+        }}
+        placeholder={placeholder ?? "輸入客戶名稱，會即時搜尋既有客戶"}
+        required={required}
+        autoComplete="off"
+      />
+
+      {showDropdown ? (
+        <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-64 overflow-auto rounded-lg border bg-popover p-1 shadow-md">
+          {ranked.map((r) => (
+            <button
+              key={`${r.suggestion.name}::${r.suggestion.id ?? ""}`}
+              type="button"
+              className="flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-left text-sm hover:bg-muted"
+              onMouseDown={(event) => {
+                // mousedown → prevent default keeps the input focused so the
+                // blur-close doesn't race with the click handler.
+                event.preventDefault()
+                onPick(r.suggestion)
+                setOpen(false)
+              }}
+            >
+              <span className="truncate">
+                {r.suggestion.name}
+                {r.suggestion.id ? (
+                  <span className="ml-2 text-xs text-muted-foreground">{r.suggestion.id}</span>
+                ) : (
+                  <span className="ml-2 text-xs text-amber-700 dark:text-amber-300">
+                    （無 Users 文件）
+                  </span>
+                )}
+              </span>
+              {r.score >= 95 ? (
+                <Badge variant="secondary" className="shrink-0 text-[10px]">
+                  相近
+                </Badge>
+              ) : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {nearMatches.length > 0 ? (
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-100 px-3 py-2 text-xs text-amber-900 dark:bg-amber-500/15 dark:text-amber-200">
+          <AlertTriangle className="size-3.5 shrink-0" />
+          <span>資料庫已有相似客戶，請點選帶入避免重複建立：</span>
+          {nearMatches.map((m) => (
+            <Button
+              key={`${m.name}::${m.id ?? ""}`}
+              type="button"
+              size="xs"
+              variant="outline"
+              className="h-6"
+              onClick={() => onPick(m)}
+            >
+              {m.name}
+            </Button>
+          ))}
+        </div>
+      ) : null}
+
+      {showNewHint ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          資料庫沒有相似的客戶，送出後會建立成新客戶。
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
 function EntryView({
   editingId,
   form,
@@ -1338,6 +1483,7 @@ function EntryView({
   submitOrder,
   resetForm,
   customers,
+  customerSuggestions,
   driverLabelOptions,
   products,
   busy,
@@ -1351,6 +1497,7 @@ function EntryView({
   submitOrder: (event: React.FormEvent<HTMLFormElement>) => void
   resetForm: () => void
   customers: UserDoc[]
+  customerSuggestions: CustomerSuggestion[]
   driverLabelOptions: string[]
   products: ProductDoc[]
   busy: boolean
@@ -1368,14 +1515,6 @@ function EntryView({
     })
   }
 
-  const onPickCustomer = (customerId: string | null) => {
-    if (!customerId) return
-    const customer = customers.find((u) => u.id === customerId)
-    if (!customer) return
-    setField("customerId", customer.id)
-    setField("customerName", customer.displayName)
-  }
-
   return (
     <Card id="order-form">
       <CardHeader>
@@ -1389,6 +1528,19 @@ function EntryView({
       <CardContent>
         <form className="flex flex-col gap-5" onSubmit={submitOrder}>
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <Field label="客戶名稱">
+              <CustomerCombobox
+                value={form.customerName}
+                onValueChange={(next) => setField("customerName", next)}
+                onPick={(picked) => {
+                  setField("customerName", picked.name)
+                  if (picked.id) setField("customerId", picked.id)
+                }}
+                suggestions={customerSuggestions}
+                required
+                placeholder="輸入名稱即時搜尋（例如：永大營造）"
+              />
+            </Field>
             <Field label="客戶 (LINE ID)">
               <Input
                 value={form.customerId}
@@ -1402,30 +1554,6 @@ function EntryView({
                   <option key={customer.id} value={customer.id} label={customer.displayName} />
                 ))}
               </datalist>
-            </Field>
-            <Field label="客戶名稱">
-              <Input
-                value={form.customerName}
-                onChange={(event) => setField("customerName", event.target.value)}
-                placeholder="例如：永大營造"
-                required
-              />
-            </Field>
-            <Field label="從客戶名單帶入">
-              <Select value={form.customerId} onValueChange={onPickCustomer}>
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder={customers.length === 0 ? "尚無客戶" : "選擇既有客戶"} />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    {customers.map((customer) => (
-                      <SelectItem key={customer.id} value={customer.id}>
-                        {customer.displayName}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
             </Field>
             <Field label="送貨人員 (選填)">
               <Input
