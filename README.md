@@ -138,7 +138,7 @@ npm run seed:clear
 
 | 欄位 | 型態 | 必填 | 說明 |
 |---|---|---|---|
-| `role` | string | ✓ | `boss` / `driver` / `customer` |
+| `role` | string | ✓ | `boss` / `customer`（系統只有兩種角色；送達是由 boss 在 dashboard 上回報，沒有 driver 角色） |
 | `displayName` | string | ✓ | 顯示名稱 |
 | `phone` | string | | 聯絡電話 |
 | `createdAt` | Timestamp | ✓ | 加入時間 |
@@ -163,13 +163,13 @@ npm run seed:clear
 |---|---|---|---|
 | `customerId` | string | ✓ | 下單客戶 LINE ID |
 | `customerName` | string | ✓ | 客戶名稱（反正規化欄位） |
-| `driverId` | string \| null | ✓ | 出貨司機 LINE ID。`null` ＝**尚未指派**（系統永遠不會寫字串 `"尚未指派"`） |
+| `driverId` | string \| null | ✓ | **送貨人員的自由文字標籤**（例如 "阿明"、車號）。**不是** Users 的 foreign key。`null` ＝**尚未指派**（系統永遠不會寫字串 `"尚未指派"`）。dashboard 從「標記送達」對話框寫入 |
 | `items` | array | ✓ | 訂單品項陣列（見下） |
 | `totalAmount` | number | ✓ | 訂單總金額 ＝ Σ `items[].subtotal` |
 | `paymentStatus` | string | ✓ | `unpaid` / `paid` / **`pending_confirmation`**（客戶在 LINE 回報已付款，但老闆尚未確認入帳） |
 | `paymentMethod` | string \| null | | `cash` / `transfer` / `check`。**狀態不是 `paid` 時固定為 `null`** |
 | `orderDate` | Timestamp | ✓ | 下單時間 |
-| `deliveryDate` | Timestamp \| null | | **只由司機在 LINE 上 `mark_delivered` 時寫入**；其他狀態維持 `null` |
+| `deliveryDate` | Timestamp \| null | | **只由 boss 在 dashboard 的「標記送達」對話框寫入**（透過 `markOrderDelivered` 用 `serverTimestamp()`）；其他狀態維持 `null` |
 | `paidAt` | Timestamp \| null | | **只在轉換成 `paid` 時設**（dashboard 與 bot 一律用 `serverTimestamp()`，避免使用者本機時鐘不準） |
 | `createdAt` | Timestamp | ✓ | 建單時的伺服器時間（`serverTimestamp()`） |
 
@@ -188,6 +188,8 @@ npm run seed:clear
 > **設計備註**：`customerName` 採反正規化（從 Users 複製），避免出報表時對 Users 做二次查詢，以空間換查詢效能。
 
 > **遷移備註**：在這個 PR 落地之前建立的舊訂單可能沒有 `paidAt` 欄位，已結清訂單會以 `paidAt = null` 顯示；無需 migration script。
+>
+> **角色遷移備註**：舊 `Users` 文件如果 `role === "driver"`，dashboard 讀取時會自動 coerce 成 `"customer"` 並 `console.warn` 一次（含 doc ID 方便清理）。等順便在 Firebase Console 把這些舊文件的 `role` 欄位改成 `"customer"` 即可，沒有 hard requirement。
 
 ---
 
@@ -308,8 +310,8 @@ PDF 列印頁會帶標題、列印時間戳、總筆數，表格採斑馬紋，`
 點 sidebar 左下角頭像或齒輪，可調整：
 
 ### 個人資料
-- 顯示名稱、角色（老闆/司機/客戶）、電話、備註
-- 角色會影響頭像配色（紫/青/綠）
+- 顯示名稱、角色（老闆 / 客戶）、電話、備註
+- 角色會影響頭像配色（紫色＝老闆，綠色＝客戶）
 
 ### 外觀（即時生效）
 - **主題模式**：淺色 / 深色 / 跟隨系統
@@ -366,11 +368,15 @@ firebase deploy --only firestore:rules,firestore:indexes
 
 ### 角色規則摘要
 
-| Collection | boss | driver | customer |
-|---|---|---|---|
-| Users | read all + write | read all | 只能讀自己 |
-| Products | read + write | read | read |
-| Orders | read + write 全部 | read 全部、update 全部 | 只能 read 自己的、create 時 `customerId` 必須等於 `request.auth.uid` |
+系統只有兩種角色：`boss` 與 `customer`。送達回報由 boss 在 dashboard 進行
+（透過「標記送達」對話框寫入 `deliveryDate` + 自由文字 `driverId`），bot 不
+再有 driver command surface。
+
+| Collection | boss | customer |
+|---|---|---|
+| Users | read all + write | 只能讀自己 |
+| Products | read + write | read |
+| Orders | read + write 全部 | 只能 read 自己的、create 時 `customerId` 必須等於 `request.auth.uid`（**customer 不能 update**） |
 
 ### 索引
 
@@ -407,8 +413,9 @@ firebase deploy --only firestore:rules,firestore:indexes
 |---|---|---|
 | `paymentStatus = "pending_confirmation"` | LINE bot（客戶回報已付） | dashboard 的「待老闆確認」chip 會撈出來 |
 | `paymentStatus = "paid"` + `paidAt` | dashboard 的「確認入帳」按鈕 | 永遠用 `serverTimestamp()`，不能用 client 時鐘 |
-| `deliveryDate` | LINE bot 司機端 `mark_delivered` | dashboard 不會主動寫；編輯訂單時是 boss 後補才寫 |
-| `driverId = null` | 兩端皆可 | 永遠用 `null` 表示未指派，不要寫 `"尚未指派"` 等字串 |
+| `deliveryDate` + `driverId`（free-text label） | dashboard 的「標記送達」對話框 | 透過 `markOrderDelivered(id, label)` 寫入。bot 端需移除 `_handle_driver_message` / `送達 ORD-…` driver command 與 `update_order_payment(driver_id=…)` 參數 |
+| `driverId` | 兩端皆可寫 | **自由文字標籤**（boss 在 dashboard 上手打或從 datalist 選），**不是** Users foreign key。`null` 表示未指派，永遠不要寫 `"尚未指派"` |
+| `role = "driver"` 舊文件 | n/a | dashboard 讀取時 coerce 成 `"customer"` 並 `console.warn`。bot 端如果還在寫這個值需要一起拿掉 |
 | `Users` / `Products` 寫入 | dashboard 會用 `setDoc(..., { merge: true })` | 確保 bot 之後新增欄位（例如 `lastSeenAt`、`liffConsent`）不會被覆蓋 |
 
 `firestore.indexes.json` 是 dashboard 與 bot 的**共同 source of truth**；bot 端的 README 應反向 link 到這份檔案，不要各自維護一份。

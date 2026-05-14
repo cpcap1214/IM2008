@@ -21,6 +21,7 @@ import {
   Sparkles,
   Trash2,
   Truck,
+  Undo2,
   Wallet,
 } from "lucide-react"
 
@@ -70,6 +71,8 @@ import {
   confirmOrderPayment,
   createOrder,
   deleteOrder as deleteOrderDoc,
+  markOrderDelivered,
+  resetOrderDelivery,
   subscribeOrders,
   subscribeProducts,
   subscribeUsers,
@@ -204,9 +207,9 @@ const paymentStatusLabel: Record<OrderPaymentStatus, string> = {
   pending_confirmation: "待老闆確認",
 }
 
-function driverLabel(driverId: string | null, drivers: UserDoc[]) {
-  if (!driverId) return "未指派"
-  return drivers.find((u) => u.id === driverId)?.displayName ?? driverId
+function deliveryPersonLabel(driverId: string | null) {
+  if (!driverId || !driverId.trim()) return "未指派"
+  return driverId
 }
 
 function summarizeItems(items: OrderItem[]) {
@@ -268,6 +271,7 @@ function DashboardApp() {
   const [activeView, setActiveView] = useState<ViewKey>(prefs.defaultView)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [confirmTarget, setConfirmTarget] = useState<OrderDoc | null>(null)
+  const [deliveryTarget, setDeliveryTarget] = useState<OrderDoc | null>(null)
   const seedEnabled = isSeedEnabled()
 
   useEffect(() => {
@@ -294,8 +298,17 @@ function DashboardApp() {
   }, [])
 
   const customers = useMemo(() => users.filter((u) => u.role === "customer"), [users])
-  const drivers = useMemo(() => users.filter((u) => u.role === "driver"), [users])
   const activeProducts = useMemo(() => products.filter((p) => p.isActive), [products])
+
+  // Autocomplete pool for the free-text "送貨人員" field — distinct non-empty
+  // driverId values from existing orders so the boss can quickly re-use names.
+  const driverLabelSuggestions = useMemo(() => {
+    const set = new Set<string>()
+    for (const o of orders) {
+      if (o.driverId && o.driverId.trim()) set.add(o.driverId.trim())
+    }
+    return Array.from(set).sort()
+  }, [orders])
 
   const setField = <K extends keyof OrderFormData>(key: K, value: OrderFormData[K]) => {
     setForm((current) => ({ ...current, [key]: value }))
@@ -436,6 +449,30 @@ function DashboardApp() {
         confirmOrderPayment(orderId, method),
       )
       if (result !== null) setConfirmTarget(null)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const markDelivered = async (orderId: string, driverLabel: string | null) => {
+    setBusy(true)
+    try {
+      const result = await withWriteFeedback("標記送達", () =>
+        markOrderDelivered(orderId, driverLabel),
+      )
+      if (result !== null) setDeliveryTarget(null)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const undoDelivery = async (orderId: string) => {
+    const target = orders.find((o) => o.id === orderId)
+    if (!target) return
+    if (!window.confirm(`確定將「${target.customerName} - ${summarizeItems(target.items)}」改回未送達？`)) return
+    setBusy(true)
+    try {
+      await withWriteFeedback("重設送達", () => resetOrderDelivery(orderId))
     } finally {
       setBusy(false)
     }
@@ -720,7 +757,7 @@ function DashboardApp() {
                 submitOrder={submitOrder}
                 resetForm={resetForm}
                 customers={customers}
-                drivers={drivers}
+                driverLabelOptions={driverLabelSuggestions}
                 products={activeProducts}
                 busy={busy}
               />
@@ -729,20 +766,21 @@ function DashboardApp() {
             {activeView === "payments" ? (
               <PaymentsView
                 outstandingOrders={dashboard.outstandingOrders}
-                drivers={drivers}
                 today={todayDate}
                 onEdit={editOrder}
                 onDelete={removeOrder}
                 onConfirmPayment={(order) => setConfirmTarget(order)}
+                onMarkDelivered={(order) => setDeliveryTarget(order)}
+                onResetDelivery={undoDelivery}
               />
             ) : null}
 
             {activeView === "shipments" ? (
               <ShipmentsView
                 pendingShipments={dashboard.pendingShipments}
-                drivers={drivers}
                 onEdit={editOrder}
                 onDelete={removeOrder}
+                onMarkDelivered={(order) => setDeliveryTarget(order)}
               />
             ) : null}
 
@@ -778,6 +816,16 @@ function DashboardApp() {
         onConfirm={confirmPayment}
         busy={busy}
       />
+      <ConfirmDeliveryDialog
+        order={deliveryTarget}
+        open={deliveryTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeliveryTarget(null)
+        }}
+        onConfirm={markDelivered}
+        suggestions={driverLabelSuggestions}
+        busy={busy}
+      />
     </main>
   )
 }
@@ -790,9 +838,7 @@ function SidebarUserFooter({ onOpenSettings }: { onOpenSettings: () => void }) {
   const avatarTone =
     profile.role === "boss"
       ? "bg-primary text-primary-foreground"
-      : profile.role === "driver"
-        ? "bg-chart-2/80 text-foreground"
-        : "bg-chart-1/80 text-foreground"
+      : "bg-chart-1/80 text-foreground"
 
   return (
     <div className="mt-auto flex items-center gap-2 border-t pt-3">
@@ -910,6 +956,83 @@ function stateTone(state: DerivedOrderState): "default" | "muted" | "danger" | "
   if (state === "已完成") return "default"
   if (state === "待收款") return "muted"
   return "danger"
+}
+
+function ConfirmDeliveryDialog({
+  order,
+  open,
+  onOpenChange,
+  onConfirm,
+  suggestions,
+  busy,
+}: {
+  order: OrderDoc | null
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onConfirm: (orderId: string, driverLabel: string | null) => Promise<void> | void
+  suggestions: string[]
+  busy: boolean
+}) {
+  const [label, setLabel] = useState("")
+  const listId = "delivery-label-suggestions"
+
+  useEffect(() => {
+    if (open) setLabel(order?.driverId ?? "")
+  }, [open, order?.id, order?.driverId])
+
+  if (!order) return null
+
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    await onConfirm(order.id, label)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          <DialogHeader>
+            <DialogTitle>標記送達</DialogTitle>
+            <DialogDescription>
+              將 <span className="font-medium text-foreground">{order.customerName}</span> 的訂單標記為已送達，
+              送達時間會用伺服器時間記錄。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center justify-between rounded-lg border bg-muted/40 p-3 text-sm">
+              <span className="text-muted-foreground">訂單金額</span>
+              <span className="font-semibold tabular-nums">{money(order.totalAmount)}</span>
+            </div>
+            <Field label="送貨人員 (選填，自由輸入)">
+              <Input
+                value={label}
+                onChange={(event) => setLabel(event.target.value)}
+                placeholder="例如：阿明 / 車號 9527"
+                list={listId}
+                autoFocus
+              />
+              {suggestions.length > 0 ? (
+                <datalist id={listId}>
+                  {suggestions.map((s) => (
+                    <option key={s} value={s} />
+                  ))}
+                </datalist>
+              ) : null}
+            </Field>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+              取消
+            </Button>
+            <Button type="submit" disabled={busy}>
+              <Truck data-icon="inline-start" />
+              標記送達
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
 function ConfirmPaymentDialog({
@@ -1215,7 +1338,7 @@ function EntryView({
   submitOrder,
   resetForm,
   customers,
-  drivers,
+  driverLabelOptions,
   products,
   busy,
 }: {
@@ -1228,7 +1351,7 @@ function EntryView({
   submitOrder: (event: React.FormEvent<HTMLFormElement>) => void
   resetForm: () => void
   customers: UserDoc[]
-  drivers: UserDoc[]
+  driverLabelOptions: string[]
   products: ProductDoc[]
   busy: boolean
 }) {
@@ -1304,27 +1427,20 @@ function EntryView({
                 </SelectContent>
               </Select>
             </Field>
-            <Field label="出貨司機">
-              <Select
-                value={form.driverId || "none"}
-                onValueChange={(value) =>
-                  setField("driverId", value && value !== "none" ? value : "")
-                }
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="未指定" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    <SelectItem value="none">未指定</SelectItem>
-                    {drivers.map((driver) => (
-                      <SelectItem key={driver.id} value={driver.id}>
-                        {driver.displayName}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
+            <Field label="送貨人員 (選填)">
+              <Input
+                value={form.driverId}
+                onChange={(event) => setField("driverId", event.target.value)}
+                placeholder="例如：阿明 / 車號 9527"
+                list="driver-label-options"
+              />
+              {driverLabelOptions.length > 0 ? (
+                <datalist id="driver-label-options">
+                  {driverLabelOptions.map((label) => (
+                    <option key={label} value={label} />
+                  ))}
+                </datalist>
+              ) : null}
             </Field>
             <Field label="訂單日期">
               <Input
@@ -1515,25 +1631,35 @@ type DriverFilter = string // "all" | "unassigned" | <driverId>
 
 function PaymentsView({
   outstandingOrders,
-  drivers,
   today,
   onEdit,
   onDelete,
   onConfirmPayment,
+  onMarkDelivered,
+  onResetDelivery,
 }: {
   outstandingOrders: OrderDoc[]
-  drivers: UserDoc[]
   today: Date
   onEdit: (order: OrderDoc) => void
   onDelete: (id: string) => void
   onConfirmPayment: (order: OrderDoc) => void
+  onMarkDelivered: (order: OrderDoc) => void
+  onResetDelivery: (id: string) => void
 }) {
   const [statusFilter, setStatusFilter] = useState<PaymentsFilter>("all")
   const [driverFilter, setDriverFilter] = useState<DriverFilter>("all")
 
-  const driverName = (driverId: string | null) => driverLabel(driverId, drivers)
+  const driverName = (driverId: string | null) => deliveryPersonLabel(driverId)
   const paymentMethodLabel = (method: OrderPaymentMethod | null) =>
     paymentMethodOptions.find((opt) => opt.value === method)?.label ?? ""
+
+  const driverOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const o of outstandingOrders) {
+      if (o.driverId && o.driverId.trim()) set.add(o.driverId.trim())
+    }
+    return Array.from(set).sort()
+  }, [outstandingOrders])
 
   const unpaidCount = useMemo(
     () => outstandingOrders.filter((o) => o.paymentStatus === "unpaid").length,
@@ -1549,8 +1675,10 @@ function PaymentsView({
     return outstandingOrders.filter((order) => {
       if (statusFilter !== "all" && order.paymentStatus !== statusFilter) return false
       if (driverFilter === "all") return true
-      if (driverFilter === "unassigned") return order.driverId === null
-      return order.driverId === driverFilter
+      if (driverFilter === "unassigned") {
+        return !order.driverId || !order.driverId.trim()
+      }
+      return (order.driverId ?? "").trim() === driverFilter
     })
   }, [outstandingOrders, statusFilter, driverFilter])
 
@@ -1559,7 +1687,7 @@ function PaymentsView({
     { key: "items", label: "訂單品項", getValue: (o) => summarizeItems(o.items) },
     { key: "amount", label: "訂單金額", getValue: (o) => o.totalAmount },
     { key: "orderDate", label: "下單日", getValue: (o) => o.orderDate },
-    { key: "driver", label: "司機", getValue: (o) => driverName(o.driverId) },
+    { key: "driver", label: "送貨人員", getValue: (o) => driverName(o.driverId) },
     {
       key: "paymentStatus",
       label: "收款",
@@ -1610,7 +1738,7 @@ function PaymentsView({
             ))}
           </div>
           <div className="flex items-center gap-2 sm:ml-auto">
-            <Label className="text-xs text-muted-foreground">司機</Label>
+            <Label className="text-xs text-muted-foreground">送貨人員</Label>
             <Select
               value={driverFilter}
               onValueChange={(value) => {
@@ -1622,11 +1750,11 @@ function PaymentsView({
               </SelectTrigger>
               <SelectContent>
                 <SelectGroup>
-                  <SelectItem value="all">全部司機</SelectItem>
+                  <SelectItem value="all">全部</SelectItem>
                   <SelectItem value="unassigned">未指派</SelectItem>
-                  {drivers.map((driver) => (
-                    <SelectItem key={driver.id} value={driver.id}>
-                      {driver.displayName}
+                  {driverOptions.map((label) => (
+                    <SelectItem key={label} value={label}>
+                      {label}
                     </SelectItem>
                   ))}
                 </SelectGroup>
@@ -1649,7 +1777,7 @@ function PaymentsView({
               <TableHead className="text-right">金額</TableHead>
               <TableHead>下單日</TableHead>
               <TableHead>距今</TableHead>
-              <TableHead>司機</TableHead>
+              <TableHead>送貨人員</TableHead>
               <TableHead>狀態</TableHead>
               <TableHead className="text-right">操作</TableHead>
             </TableRow>
@@ -1682,6 +1810,12 @@ function PaymentsView({
                           order.paymentStatus === "pending_confirmation"
                             ? () => onConfirmPayment(order)
                             : undefined
+                        }
+                        onMarkDelivered={
+                          order.deliveryDate ? undefined : () => onMarkDelivered(order)
+                        }
+                        onResetDelivery={
+                          order.deliveryDate ? () => onResetDelivery(order.id) : undefined
                         }
                       />
                     </TableCell>
@@ -1746,16 +1880,16 @@ function aggregatePendingItems(orders: OrderDoc[]): AggregatedItem[] {
 
 function ShipmentsView({
   pendingShipments,
-  drivers,
   onEdit,
   onDelete,
+  onMarkDelivered,
 }: {
   pendingShipments: OrderDoc[]
-  drivers: UserDoc[]
   onEdit: (order: OrderDoc) => void
   onDelete: (id: string) => void
+  onMarkDelivered: (order: OrderDoc) => void
 }) {
-  const driverName = (driverId: string | null) => driverLabel(driverId, drivers)
+  const driverName = (driverId: string | null) => deliveryPersonLabel(driverId)
 
   const aggregated = useMemo(() => aggregatePendingItems(pendingShipments), [pendingShipments])
   const totalProductTypes = aggregated.length
@@ -1777,7 +1911,7 @@ function ShipmentsView({
     { key: "items", label: "訂單品項", getValue: (o) => summarizeItems(o.items) },
     { key: "amount", label: "訂單金額", getValue: (o) => o.totalAmount },
     { key: "orderDate", label: "下單日", getValue: (o) => o.orderDate },
-    { key: "driver", label: "司機", getValue: (o) => driverName(o.driverId) },
+    { key: "driver", label: "送貨人員", getValue: (o) => driverName(o.driverId) },
     {
       key: "paymentStatus",
       label: "收款",
@@ -1879,7 +2013,7 @@ function ShipmentsView({
                 <TableHead>訂單品項</TableHead>
                 <TableHead className="text-right">訂單金額</TableHead>
                 <TableHead>下單日</TableHead>
-                <TableHead>司機</TableHead>
+                <TableHead>送貨人員</TableHead>
                 <TableHead>收款</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
@@ -1939,7 +2073,12 @@ function ShipmentsView({
                         <PaymentStatusBadge status={order.paymentStatus} />
                       </TableCell>
                       <TableCell className="py-3">
-                        <RowActions order={order} onEdit={onEdit} onDelete={onDelete} />
+                        <RowActions
+                          order={order}
+                          onEdit={onEdit}
+                          onDelete={onDelete}
+                          onMarkDelivered={() => onMarkDelivered(order)}
+                        />
                       </TableCell>
                     </TableRow>
                   )
@@ -2148,18 +2287,40 @@ function RowActions({
   onEdit,
   onDelete,
   onConfirmPayment,
+  onMarkDelivered,
+  onResetDelivery,
 }: {
   order: OrderDoc
   onEdit: (order: OrderDoc) => void
   onDelete: (id: string) => void
   onConfirmPayment?: () => void
+  onMarkDelivered?: () => void
+  onResetDelivery?: () => void
 }) {
   return (
-    <div className="flex justify-end gap-1">
+    <div className="flex flex-wrap justify-end gap-1">
       {onConfirmPayment ? (
         <Button type="button" size="sm" onClick={onConfirmPayment}>
           <CheckCircle2 data-icon="inline-start" />
           確認入帳
+        </Button>
+      ) : null}
+      {onMarkDelivered ? (
+        <Button type="button" size="sm" variant="outline" onClick={onMarkDelivered}>
+          <Truck data-icon="inline-start" />
+          標記送達
+        </Button>
+      ) : null}
+      {onResetDelivery ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          onClick={onResetDelivery}
+          aria-label="重設送達"
+          title="重設送達"
+        >
+          <Undo2 />
         </Button>
       ) : null}
       <Button type="button" variant="ghost" size="icon-sm" onClick={() => onEdit(order)} aria-label="編輯">

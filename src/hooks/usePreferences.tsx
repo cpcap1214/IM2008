@@ -11,7 +11,7 @@ export type ThemeMode = "light" | "dark" | "system"
 export type FontSize = "small" | "medium" | "large"
 export type AccentColor = "violet" | "teal" | "rose" | "amber" | "slate"
 export type DefaultView = "overview" | "entry" | "payments" | "shipments"
-export type ProfileRole = "boss" | "driver" | "customer"
+export type ProfileRole = "boss" | "customer"
 
 export type Profile = {
   displayName: string
@@ -208,6 +208,5 @@ export function usePreferences() {
 
 export const ROLE_LABEL: Record<ProfileRole, string> = {
   boss: "老闆",
-  driver: "司機",
   customer: "客戶",
 }

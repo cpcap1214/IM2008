@@ -16,7 +16,7 @@ import {
 
 import { getDb } from "./firebase"
 
-export type UserRole = "boss" | "driver" | "customer"
+export type UserRole = "boss" | "customer"
 
 export type UserDoc = {
   id: string
@@ -50,6 +50,15 @@ export type OrderDoc = {
   id: string
   customerId: string
   customerName: string
+  /**
+   * driverId — free-text label of who physically delivered the order
+   * (e.g. "阿明" or a vehicle number). NOT a foreign key into Users.
+   * `null` when not yet assigned. Set by the boss in the dashboard's
+   * "標記送達" dialog.
+   *
+   * The field name is preserved on disk for compatibility with the LINE bot;
+   * renaming it would require a coordinated two-phase migration.
+   */
   driverId: string | null
   items: OrderItem[]
   totalAmount: number
@@ -85,6 +94,31 @@ function dateToTimestamp(value: Date | null): Timestamp | null {
   return value ? Timestamp.fromDate(value) : null
 }
 
+// Tracks which legacy driver user IDs we've already warned about in this
+// session so we don't flood the console as Firestore re-emits snapshots.
+const legacyDriverIdsWarned = new Set<string>()
+
+function coerceUserRole(rawRole: unknown, docId: string): UserRole {
+  if (rawRole === "boss") return "boss"
+  if (rawRole === "customer") return "customer"
+  if (rawRole === "driver") {
+    if (!legacyDriverIdsWarned.has(docId)) {
+      legacyDriverIdsWarned.add(docId)
+      console.warn(
+        `[firestore] legacy Users/${docId} has role="driver"; coercing to "customer". ` +
+          `Run a one-off cleanup to flip stale documents on disk.`,
+      )
+    }
+    return "customer"
+  }
+  return "customer"
+}
+
+/** Test-only hook for resetting the warned-once memo. Not part of the public API. */
+export function __resetLegacyDriverWarnings() {
+  legacyDriverIdsWarned.clear()
+}
+
 const userConverter: FirestoreDataConverter<UserDoc> = {
   toFirestore: (user) => {
     const data = user as Partial<UserDoc>
@@ -103,7 +137,7 @@ const userConverter: FirestoreDataConverter<UserDoc> = {
     const data = snap.data()
     return {
       id: snap.id,
-      role: (data.role as UserRole) ?? "customer",
+      role: coerceUserRole(data.role, snap.id),
       displayName: data.displayName ?? "",
       phone: data.phone ?? "",
       createdAt: tsToDate(data.createdAt),
@@ -111,6 +145,8 @@ const userConverter: FirestoreDataConverter<UserDoc> = {
     }
   },
 }
+
+export { userConverter }
 
 const productConverter: FirestoreDataConverter<ProductDoc> = {
   toFirestore: (product) => ({
@@ -295,6 +331,33 @@ export async function updateOrder(
 
 export async function deleteOrder(id: string) {
   return deleteDoc(doc(getDb(), "Orders", id))
+}
+
+/**
+ * Boss-only action: stamp the order as delivered with the server clock and
+ * record an optional free-text label for who physically delivered it.
+ * Whitespace-only labels are normalized to `null`.
+ */
+export async function markOrderDelivered(
+  id: string,
+  driverLabel: string | null,
+) {
+  const trimmed = driverLabel && driverLabel.trim() ? driverLabel.trim() : null
+  return updateDoc(doc(getDb(), "Orders", id), {
+    deliveryDate: serverTimestamp(),
+    driverId: trimmed,
+  })
+}
+
+/**
+ * Boss-only correction: roll the order back to "not yet delivered" so the
+ * boss can re-stamp it with the right date. Keeps `driverId` on the doc for
+ * audit — the boss can edit it via the "標記送達" dialog when re-marking.
+ */
+export async function resetOrderDelivery(id: string) {
+  return updateDoc(doc(getDb(), "Orders", id), {
+    deliveryDate: null,
+  })
 }
 
 /**

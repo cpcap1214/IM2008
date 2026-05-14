@@ -1,5 +1,6 @@
-// Authenticated-only baseline aligned with the LINE bot's role model.
-// Boss: full access. Driver: read all + update orders. Customer: read own.
+// Authenticated-only baseline aligned with the dashboard's two-role model
+// (boss + customer). The legacy `driver` role has been removed everywhere;
+// boss now reports delivery from the dashboard.
 //
 // TODO(auth): Firebase Auth + custom claims (`role`) are not wired yet.
 // Deploy these rules ONLY after the dashboard's auth integration PR lands;
@@ -8,10 +9,9 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Boss & driver: read all; customer: read own
     match /Users/{userId} {
       allow read: if request.auth != null &&
-                  (request.auth.token.role in ["boss", "driver"] ||
+                  (request.auth.token.role == "boss" ||
                    request.auth.uid == userId);
       allow write: if request.auth.token.role == "boss";
     }
@@ -23,11 +23,12 @@ service cloud.firestore {
 
     match /Orders/{orderId} {
       allow read: if request.auth != null &&
-                  (request.auth.token.role in ["boss", "driver"] ||
+                  (request.auth.token.role == "boss" ||
                    resource.data.customerId == request.auth.uid);
       allow create: if request.auth.token.role in ["boss", "customer"] &&
                     request.resource.data.customerId == request.auth.uid;
-      allow update: if request.auth.token.role in ["boss", "driver"];
+      // Only boss can flip paymentStatus / set deliveryDate / edit orders.
+      allow update: if request.auth.token.role == "boss";
       allow delete: if request.auth.token.role == "boss";
     }
   }

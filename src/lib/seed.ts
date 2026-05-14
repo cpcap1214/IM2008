@@ -33,8 +33,6 @@ function daysFromToday(days: number) {
 
 const seedUsers: Array<{ id: string; role: UserRole; displayName: string; phone: string; notes: string }> = [
   { id: "SEED_USER_BOSS_001", role: "boss", displayName: "林老闆", phone: "0911111111", notes: "" },
-  { id: "SEED_USER_DRIVER_001", role: "driver", displayName: "司機 阿明", phone: "0922222222", notes: "" },
-  { id: "SEED_USER_DRIVER_002", role: "driver", displayName: "司機 阿凱", phone: "0933333333", notes: "" },
   { id: "SEED_USER_CUSTOMER_001", role: "customer", displayName: "永大營造", phone: "0944111111", notes: "每週三公休不送貨" },
   { id: "SEED_USER_CUSTOMER_002", role: "customer", displayName: "洪水泥工", phone: "0944222222", notes: "" },
   { id: "SEED_USER_CUSTOMER_003", role: "customer", displayName: "金池營造", phone: "0944333333", notes: "" },
@@ -68,7 +66,8 @@ function buildSeedOrders(): SeedOrder[] {
       id: "SEED_ORDER_001",
       customerId: "SEED_USER_CUSTOMER_001",
       customerName: "永大營造",
-      driverId: "SEED_USER_DRIVER_001",
+      // Not yet delivered → null (boss will fill in via the "標記送達" dialog)
+      driverId: null,
       items: [
         { productName: "化糞池", spec: "FRP 標準型", quantity: 2, unitPrice: 43000, subtotal: 86000 },
       ],
@@ -82,7 +81,7 @@ function buildSeedOrders(): SeedOrder[] {
       id: "SEED_ORDER_002",
       customerId: "SEED_USER_CUSTOMER_002",
       customerName: "洪水泥工",
-      driverId: "SEED_USER_DRIVER_002",
+      driverId: "阿凱",
       items: [
         { productName: "陰井", spec: "30 x 30 cm", quantity: 8, unitPrice: 5250, subtotal: 42000 },
       ],
@@ -110,7 +109,7 @@ function buildSeedOrders(): SeedOrder[] {
       id: "SEED_ORDER_004",
       customerId: "SEED_USER_CUSTOMER_004",
       customerName: "大成營造",
-      driverId: "SEED_USER_DRIVER_001",
+      driverId: "阿明",
       items: [
         { productName: "涵管", spec: "60 cm 管徑", quantity: 12, unitPrice: 8000, subtotal: 96000 },
       ],
@@ -124,7 +123,7 @@ function buildSeedOrders(): SeedOrder[] {
       id: "SEED_ORDER_005",
       customerId: "SEED_USER_CUSTOMER_001",
       customerName: "永大營造",
-      driverId: "SEED_USER_DRIVER_002",
+      driverId: "阿凱",
       items: [
         { productName: "其他水泥製品", spec: "依規格報價", quantity: 1, unitPrice: 65000, subtotal: 65000 },
       ],

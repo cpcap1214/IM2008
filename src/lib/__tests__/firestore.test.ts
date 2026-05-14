@@ -69,6 +69,15 @@ function makeSnap(id: string, data: Record<string, unknown>) {
   >[0]
 }
 
+function makeUserSnap(id: string, data: Record<string, unknown>) {
+  return {
+    id,
+    data: () => data,
+  } as unknown as Parameters<
+    import("../firestore")["userConverter"]["fromFirestore"]
+  >[0]
+}
+
 describe("orderConverter.fromFirestore", () => {
   test("hydrates paidAt when present", async () => {
     const { orderConverter } = await loadModule()
@@ -319,5 +328,107 @@ describe("createOrder", () => {
     const data = addDocMock.mock.calls[0][1] as Record<string, unknown>
     expect(data.paidAt).toBe(SERVER_TIMESTAMP_SENTINEL)
     expect(data.paymentMethod).toBe("cash")
+  })
+})
+
+describe("legacy driver role coercion", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  test('userConverter.fromFirestore coerces role="driver" to "customer" and warns once', async () => {
+    const { userConverter, __resetLegacyDriverWarnings } = await loadModule()
+    __resetLegacyDriverWarnings()
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      const snap = makeUserSnap("LEGACY_DRIVER_1", { role: "driver", displayName: "阿明" })
+      const out1 = userConverter.fromFirestore(snap)
+      const out2 = userConverter.fromFirestore(snap)
+      expect(out1.role).toBe("customer")
+      expect(out2.role).toBe("customer")
+      // Warned exactly once for the same doc id.
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      expect(warnSpy.mock.calls[0][0]).toContain("LEGACY_DRIVER_1")
+      expect(warnSpy.mock.calls[0][0]).toContain('role="driver"')
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  test("unknown roles still fall back to customer (no warning)", async () => {
+    const { userConverter, __resetLegacyDriverWarnings } = await loadModule()
+    __resetLegacyDriverWarnings()
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      const out = userConverter.fromFirestore(
+        makeUserSnap("U1", { role: "unknown_role" }),
+      )
+      expect(out.role).toBe("customer")
+      expect(warnSpy).not.toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+})
+
+describe("markOrderDelivered", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  test('writes deliveryDate=serverTimestamp + driverId="阿明"', async () => {
+    const { markOrderDelivered } = await loadModule()
+    await markOrderDelivered("ORDER_X", "阿明")
+    expect(updateDocMock).toHaveBeenCalledTimes(1)
+    const [ref, patch] = updateDocMock.mock.calls[0] as [
+      { id: string },
+      Record<string, unknown>,
+    ]
+    expect(ref).toEqual({ id: "ORDER_X" })
+    expect(patch).toEqual({
+      deliveryDate: SERVER_TIMESTAMP_SENTINEL,
+      driverId: "阿明",
+    })
+  })
+
+  test("whitespace-only label normalizes to null", async () => {
+    const { markOrderDelivered } = await loadModule()
+    await markOrderDelivered("ORDER_X", "   ")
+    const patch = updateDocMock.mock.calls[0][1] as Record<string, unknown>
+    expect(patch.deliveryDate).toBe(SERVER_TIMESTAMP_SENTINEL)
+    expect(patch.driverId).toBeNull()
+  })
+
+  test("null label stays null", async () => {
+    const { markOrderDelivered } = await loadModule()
+    await markOrderDelivered("ORDER_X", null)
+    const patch = updateDocMock.mock.calls[0][1] as Record<string, unknown>
+    expect(patch.deliveryDate).toBe(SERVER_TIMESTAMP_SENTINEL)
+    expect(patch.driverId).toBeNull()
+  })
+
+  test("trims surrounding whitespace from non-empty labels", async () => {
+    const { markOrderDelivered } = await loadModule()
+    await markOrderDelivered("ORDER_X", "  阿凱 ")
+    const patch = updateDocMock.mock.calls[0][1] as Record<string, unknown>
+    expect(patch.driverId).toBe("阿凱")
+  })
+})
+
+describe("resetOrderDelivery", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  test("nulls deliveryDate without touching driverId", async () => {
+    const { resetOrderDelivery } = await loadModule()
+    await resetOrderDelivery("ORDER_X")
+    const [ref, patch] = updateDocMock.mock.calls[0] as [
+      { id: string },
+      Record<string, unknown>,
+    ]
+    expect(ref).toEqual({ id: "ORDER_X" })
+    expect(patch).toEqual({ deliveryDate: null })
+    expect("driverId" in patch).toBe(false)
   })
 })

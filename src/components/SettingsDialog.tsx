@@ -159,7 +159,7 @@ export function SettingsDialog({
                       </SelectTrigger>
                       <SelectContent>
                         <SelectGroup>
-                          {(["boss", "driver", "customer"] as ProfileRole[]).map((role) => (
+                          {(["boss", "customer"] as ProfileRole[]).map((role) => (
                             <SelectItem key={role} value={role}>
                               {ROLE_LABEL[role]}
                             </SelectItem>

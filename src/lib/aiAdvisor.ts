@@ -123,7 +123,7 @@ function generateLocalSuggestions(
       severity: "warning",
       category: "shipment",
       title: `${pending.length} 筆訂單待出貨`,
-      body: `待出貨累積較多，建議檢視司機調度與生產進度。已待超過 7 天的訂單應優先排定出貨日期。`,
+      body: `待出貨累積較多，建議檢視配送排程與生產進度。已待超過 7 天的訂單應優先排定出貨日期。`,
       metric: `${pending.length} 筆`,
       action: { label: "前往出貨", view: "shipments" },
     })
@@ -385,9 +385,15 @@ function buildContext(
     customers: users
       .filter((u) => u.role === "customer")
       .map((u) => ({ id: u.id, name: u.displayName, notes: u.notes })),
-    drivers: users
-      .filter((u) => u.role === "driver")
-      .map((u) => ({ id: u.id, name: u.displayName })),
+    // Distinct delivery-person labels seen on existing orders.
+    // `driverId` is now a free-text string, not a Users ref.
+    deliveryLabels: Array.from(
+      new Set(
+        orders
+          .map((o) => (o.driverId ?? "").trim())
+          .filter((s): s is string => s.length > 0),
+      ),
+    ).sort(),
   }
 }
 
