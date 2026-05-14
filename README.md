@@ -58,7 +58,22 @@ VITE_FIREBASE_APP_ID=1:...:web:...
 # Gemini AI（可選，留空會自動 fallback 到本地規則引擎）
 VITE_GEMINI_API_KEY=AIzaSy...
 VITE_GEMINI_MODEL=gemini-2.5-flash
+
+# 範例資料寫入（本機 only；正式 build 請保持 false）
+VITE_ENABLE_SEED=false
 ```
+
+| 變數 | 必填 | 說明 |
+|---|---|---|
+| `VITE_FIREBASE_API_KEY` | ✓ | Firebase Web app key |
+| `VITE_FIREBASE_AUTH_DOMAIN` | ✓ | `your-project.firebaseapp.com` |
+| `VITE_FIREBASE_PROJECT_ID` | ✓ | Firebase project id |
+| `VITE_FIREBASE_STORAGE_BUCKET` | ✓ | `your-project.firebasestorage.app` |
+| `VITE_FIREBASE_MESSAGING_SENDER_ID` | ✓ | FCM sender id |
+| `VITE_FIREBASE_APP_ID` | ✓ | Firebase Web app id |
+| `VITE_GEMINI_API_KEY` | | 留空會自動 fallback 到本地規則引擎 |
+| `VITE_GEMINI_MODEL` | | 預設 `gemini-2.5-flash` |
+| `VITE_ENABLE_SEED` | | `true` 才會啟用「寫入/清除範例資料」按鈕與 `seedSampleData()`；正式 build 請保持 `false`，避免不小心把 `SEED_*` 文件寫到正式 Firestore |
 
 > `.env.local` 已被 `.gitignore` 排除，不會推上 GitHub。
 
@@ -148,13 +163,15 @@ npm run seed:clear
 |---|---|---|---|
 | `customerId` | string | ✓ | 下單客戶 LINE ID |
 | `customerName` | string | ✓ | 客戶名稱（反正規化欄位） |
-| `driverId` | string | | 出貨司機 LINE ID |
+| `driverId` | string \| null | ✓ | 出貨司機 LINE ID。`null` ＝**尚未指派**（系統永遠不會寫字串 `"尚未指派"`） |
 | `items` | array | ✓ | 訂單品項陣列（見下） |
-| `totalAmount` | number | ✓ | 訂單總金額 |
-| `paymentStatus` | string | ✓ | `unpaid` / `paid` |
-| `paymentMethod` | string \| null | | `cash` / `transfer` / `check` |
+| `totalAmount` | number | ✓ | 訂單總金額 ＝ Σ `items[].subtotal` |
+| `paymentStatus` | string | ✓ | `unpaid` / `paid` / **`pending_confirmation`**（客戶在 LINE 回報已付款，但老闆尚未確認入帳） |
+| `paymentMethod` | string \| null | | `cash` / `transfer` / `check`。**狀態不是 `paid` 時固定為 `null`** |
 | `orderDate` | Timestamp | ✓ | 下單時間 |
-| `deliveryDate` | Timestamp \| null | | 出貨時間（null 代表未出貨） |
+| `deliveryDate` | Timestamp \| null | | **只由司機在 LINE 上 `mark_delivered` 時寫入**；其他狀態維持 `null` |
+| `paidAt` | Timestamp \| null | | **只在轉換成 `paid` 時設**（dashboard 與 bot 一律用 `serverTimestamp()`，避免使用者本機時鐘不準） |
+| `createdAt` | Timestamp | ✓ | 建單時的伺服器時間（`serverTimestamp()`） |
 
 `items` 陣列每筆物件結構：
 
@@ -169,6 +186,8 @@ npm run seed:clear
 ```
 
 > **設計備註**：`customerName` 採反正規化（從 Users 複製），避免出報表時對 Users 做二次查詢，以空間換查詢效能。
+
+> **遷移備註**：在這個 PR 落地之前建立的舊訂單可能沒有 `paidAt` 欄位，已結清訂單會以 `paidAt = null` 顯示；無需 migration script。
 
 ---
 
@@ -334,36 +353,32 @@ firebase deploy
 
 ---
 
-## 安全規則建議（上線前必改）
+## Firestore 規則 & 索引
 
-### Firestore 規則
+`firestore.rules`、`firestore.indexes.json`、`firebase.json` 已 commit 在 repo 根目錄。
+要部署兩者：
 
-預設「測試模式」30 天後會關閉所有寫入。正式環境建議改為：
-
-```
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /Users/{userId} {
-      allow read: if request.auth != null;
-      allow write: if request.auth.uid == userId
-                   || request.auth.token.role == 'boss';
-    }
-    match /Products/{id} {
-      allow read: if request.auth != null;
-      allow write: if request.auth.token.role == 'boss';
-    }
-    match /Orders/{id} {
-      allow read: if request.auth != null;
-      allow create: if request.auth != null;
-      allow update, delete: if request.auth.token.role == 'boss'
-                            || request.auth.uid == resource.data.driverId;
-    }
-  }
-}
+```bash
+firebase deploy --only firestore:rules,firestore:indexes
 ```
 
-> 啟用認證並設 custom claim `role` 後再切到此規則。
+> ⚠ **規則尚未啟用**：`firestore.rules` 是與 LINE bot 對齊的 baseline，但需要先把 Firebase Auth 整合與 custom claim `role` 上線後才能 deploy（不然會擋掉現有的 dev seed 流程）。Auth 接好之前，`firebase.json` 會被 `firebase deploy` 讀但你只要不執行那個指令就不會觸發。
+
+### 角色規則摘要
+
+| Collection | boss | driver | customer |
+|---|---|---|---|
+| Users | read all + write | read all | 只能讀自己 |
+| Products | read + write | read | read |
+| Orders | read + write 全部 | read 全部、update 全部 | 只能 read 自己的、create 時 `customerId` 必須等於 `request.auth.uid` |
+
+### 索引
+
+`firestore.indexes.json` 已預先放入 dashboard + bot 兩端會用到的複合索引：
+
+- `Orders` (customerId asc, orderDate desc) — 客戶歷史訂單頁
+- `Orders` (customerName asc, orderDate desc) — dashboard 客戶搜尋
+- `Orders` (paymentStatus asc, orderDate asc) — 帳款分頁的「未收款」/「待確認」過濾
 
 ### Gemini API Key 限制
 
@@ -378,12 +393,52 @@ service cloud.firestore {
 
 ---
 
+## 跨 repo 協作
+
+這個 dashboard 與 LINE bot **共用同一個 Firestore 專案**：
+
+- LINE bot：[OogaryoO/yaoshun](https://github.com/OogaryoO/yaoshun)
+  - schema 定義在 [`services/firebase_db.py`](https://github.com/OogaryoO/yaoshun/blob/main/services/firebase_db.py)
+  - 訂單寫入流程在 [`handlers/message_router.py`](https://github.com/OogaryoO/yaoshun/blob/main/handlers/message_router.py)
+
+兩端需要遵守相同的 `OrderDoc` 合約（見上方 [Orders schema](#orders)）。重點：
+
+| 欄位 | 寫入端 | 規則 |
+|---|---|---|
+| `paymentStatus = "pending_confirmation"` | LINE bot（客戶回報已付） | dashboard 的「待老闆確認」chip 會撈出來 |
+| `paymentStatus = "paid"` + `paidAt` | dashboard 的「確認入帳」按鈕 | 永遠用 `serverTimestamp()`，不能用 client 時鐘 |
+| `deliveryDate` | LINE bot 司機端 `mark_delivered` | dashboard 不會主動寫；編輯訂單時是 boss 後補才寫 |
+| `driverId = null` | 兩端皆可 | 永遠用 `null` 表示未指派，不要寫 `"尚未指派"` 等字串 |
+| `Users` / `Products` 寫入 | dashboard 會用 `setDoc(..., { merge: true })` | 確保 bot 之後新增欄位（例如 `lastSeenAt`、`liffConsent`）不會被覆蓋 |
+
+`firestore.indexes.json` 是 dashboard 與 bot 的**共同 source of truth**；bot 端的 README 應反向 link 到這份檔案，不要各自維護一份。
+
+---
+
+## 開發、測試、CI
+
+```bash
+npm run dev          # 本機 dev server
+npm run lint         # ESLint
+npm run test         # Vitest
+npm run build        # tsc + vite build
+```
+
+GitHub Actions [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 會在 push / PR 時跑
+`npm ci && npm run lint && npm run test && npm run build`。lint 暫時設 `continue-on-error`，
+等遺留錯誤清完後再變硬性 gate。
+
+---
+
 ## 後續路線圖
 
 - [ ] LINE Login 整合，使用者首次登入自動寫入 Users
 - [ ] LIFF 表單給客戶下單（讀 Products、寫 Orders）
 - [ ] LINE Notify Webhook：未收款 / 待出貨提醒
 - [x] 對帳報表 CSV / Excel / PDF 匯出（帳款・出貨・分析三視圖）
-- [ ] Firebase Auth + 上述 Firestore 安全規則
+- [x] `pending_confirmation` 狀態與「確認入帳」流程
+- [x] `paidAt` 欄位用 `serverTimestamp()` 寫入
+- [x] commit `firestore.rules` / `firestore.indexes.json`（**尚未 deploy**，等 Auth 接好）
+- [ ] Firebase Auth + 部署 `firestore.rules`
 - [ ] 接 OpenAI / Claude 作為備援 AI provider
 - [ ] AI 建議的點讚/採納回饋機制（用來迭代 prompt）

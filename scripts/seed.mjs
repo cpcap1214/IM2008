@@ -10,6 +10,7 @@ import {
   doc,
   getDocs,
   getFirestore,
+  serverTimestamp,
   writeBatch,
   collection,
 } from "firebase/firestore"
@@ -42,6 +43,11 @@ for (const key of required) {
     process.exit(1)
   }
 }
+
+console.warn(
+  `⚠ 此 CLI 直接寫入 .env.local 的 Firebase 專案 (${env.VITE_FIREBASE_PROJECT_ID})，` +
+    `如果這個 project 是 LINE bot 共用的正式環境，請務必確認再執行。`,
+)
 
 const app = initializeApp({
   apiKey: env.VITE_FIREBASE_API_KEY,
@@ -110,10 +116,11 @@ function buildSeedOrders() {
       customerName: "金池營造",
       driverId: null,
       items: [{ productName: "電線桿", spec: "9 公尺 預力", quantity: 5, unitPrice: 23600, subtotal: 118000 }],
-      paymentStatus: "unpaid",
+      paymentStatus: "pending_confirmation",
       paymentMethod: null,
       orderDate: daysFromToday(-2),
       deliveryDate: null,
+      paidAt: null,
     },
     {
       id: "SEED_ORDER_004",
@@ -125,6 +132,7 @@ function buildSeedOrders() {
       paymentMethod: "cash",
       orderDate: daysFromToday(0),
       deliveryDate: daysFromToday(0),
+      paidAt: daysFromToday(0),
     },
     {
       id: "SEED_ORDER_005",
@@ -136,6 +144,7 @@ function buildSeedOrders() {
       paymentMethod: "transfer",
       orderDate: daysFromToday(-15),
       deliveryDate: daysFromToday(-10),
+      paidAt: daysFromToday(-9),
     },
   ]
 }
@@ -147,11 +156,11 @@ function dateToTs(value) {
 async function seed() {
   console.log("→ 開始寫入範例資料 ...")
   const batch = writeBatch(db)
-  const baseTime = Timestamp.now().toDate().getTime()
+  const baseTime = Date.now()
 
   for (const u of seedUsers) {
+    // 不寫 id 欄位 — doc ID 已是唯一識別。
     batch.set(doc(db, "Users", u.id), {
-      id: u.id,
       role: u.role,
       displayName: u.displayName,
       phone: u.phone,
@@ -161,15 +170,29 @@ async function seed() {
   }
 
   for (const p of seedProducts) {
-    batch.set(doc(db, "Products", p.id), p)
+    // 不寫 id 欄位 — doc ID 已是唯一識別。
+    batch.set(doc(db, "Products", p.id), {
+      productName: p.productName,
+      spec: p.spec,
+      price: p.price,
+      isActive: p.isActive,
+    })
   }
 
   for (const o of buildSeedOrders()) {
+    // 不寫 id 欄位 — doc ID 已是唯一識別。
     batch.set(doc(db, "Orders", o.id), {
-      ...o,
+      customerId: o.customerId,
+      customerName: o.customerName,
+      driverId: o.driverId,
+      items: o.items,
+      paymentStatus: o.paymentStatus,
+      paymentMethod: o.paymentMethod,
+      totalAmount: o.items.reduce((sum, item) => sum + item.subtotal, 0),
       orderDate: dateToTs(o.orderDate),
       deliveryDate: dateToTs(o.deliveryDate),
-      totalAmount: o.items.reduce((sum, item) => sum + item.subtotal, 0),
+      paidAt: dateToTs(o.paidAt ?? null),
+      createdAt: serverTimestamp(),
     })
   }
 

@@ -1,9 +1,28 @@
-import { Timestamp, collection, doc, getDocs, writeBatch } from "firebase/firestore"
+import {
+  Timestamp,
+  collection,
+  doc,
+  getDocs,
+  serverTimestamp,
+  writeBatch,
+} from "firebase/firestore"
 
 import { getDb } from "./firebase"
 import { type OrderItem, type UserRole } from "./firestore"
 
 const SEED_PREFIX = "SEED_"
+
+const SEED_DISABLED_MESSAGE =
+  "範例資料寫入/清除功能已停用。請於 .env.local 將 VITE_ENABLE_SEED 設為 \"true\" 並重啟開發伺服器後再試。"
+
+/**
+ * True only when the build was started with `VITE_ENABLE_SEED=true`. Used to
+ * keep the destructive seed/clear buttons out of production bundles, since
+ * `seedSampleData` writes to the same Firestore project the LINE bot writes to.
+ */
+export function isSeedEnabled(): boolean {
+  return import.meta.env.VITE_ENABLE_SEED === "true"
+}
 
 function daysFromToday(days: number) {
   const date = new Date()
@@ -36,10 +55,11 @@ type SeedOrder = {
   customerName: string
   driverId: string | null
   items: OrderItem[]
-  paymentStatus: "unpaid" | "paid"
+  paymentStatus: "unpaid" | "paid" | "pending_confirmation"
   paymentMethod: "cash" | "transfer" | "check" | null
   orderDate: Date
   deliveryDate: Date | null
+  paidAt: Date | null
 }
 
 function buildSeedOrders(): SeedOrder[] {
@@ -56,6 +76,7 @@ function buildSeedOrders(): SeedOrder[] {
       paymentMethod: null,
       orderDate: daysFromToday(-3),
       deliveryDate: null,
+      paidAt: null,
     },
     {
       id: "SEED_ORDER_002",
@@ -69,6 +90,7 @@ function buildSeedOrders(): SeedOrder[] {
       paymentMethod: null,
       orderDate: daysFromToday(-7),
       deliveryDate: daysFromToday(-1),
+      paidAt: null,
     },
     {
       id: "SEED_ORDER_003",
@@ -78,10 +100,11 @@ function buildSeedOrders(): SeedOrder[] {
       items: [
         { productName: "電線桿", spec: "9 公尺 預力", quantity: 5, unitPrice: 23600, subtotal: 118000 },
       ],
-      paymentStatus: "unpaid",
+      paymentStatus: "pending_confirmation",
       paymentMethod: null,
       orderDate: daysFromToday(-2),
       deliveryDate: null,
+      paidAt: null,
     },
     {
       id: "SEED_ORDER_004",
@@ -95,6 +118,7 @@ function buildSeedOrders(): SeedOrder[] {
       paymentMethod: "cash",
       orderDate: daysFromToday(0),
       deliveryDate: daysFromToday(0),
+      paidAt: daysFromToday(0),
     },
     {
       id: "SEED_ORDER_005",
@@ -108,18 +132,22 @@ function buildSeedOrders(): SeedOrder[] {
       paymentMethod: "transfer",
       orderDate: daysFromToday(-15),
       deliveryDate: daysFromToday(-10),
+      paidAt: daysFromToday(-9),
     },
   ]
 }
 
 export async function seedSampleData() {
+  if (!isSeedEnabled()) {
+    throw new Error(SEED_DISABLED_MESSAGE)
+  }
   const db = getDb()
   const batch = writeBatch(db)
-  const baseTime = Timestamp.now().toDate().getTime()
+  const baseTime = Date.now()
 
   for (const user of seedUsers) {
+    // No `id` field in body — the doc ID is the only identifier.
     batch.set(doc(db, "Users", user.id), {
-      id: user.id,
       role: user.role,
       displayName: user.displayName,
       phone: user.phone,
@@ -129,15 +157,29 @@ export async function seedSampleData() {
   }
 
   for (const product of seedProducts) {
-    batch.set(doc(db, "Products", product.id), product)
+    // No `id` field in body — the doc ID is the only identifier.
+    batch.set(doc(db, "Products", product.id), {
+      productName: product.productName,
+      spec: product.spec,
+      price: product.price,
+      isActive: product.isActive,
+    })
   }
 
   for (const order of buildSeedOrders()) {
+    // No `id` field in body — the doc ID is the only identifier.
     batch.set(doc(db, "Orders", order.id), {
-      ...order,
+      customerId: order.customerId,
+      customerName: order.customerName,
+      driverId: order.driverId,
+      items: order.items,
+      paymentStatus: order.paymentStatus,
+      paymentMethod: order.paymentMethod,
       totalAmount: order.items.reduce((sum, item) => sum + item.subtotal, 0),
       orderDate: Timestamp.fromDate(order.orderDate),
       deliveryDate: order.deliveryDate ? Timestamp.fromDate(order.deliveryDate) : null,
+      paidAt: order.paidAt ? Timestamp.fromDate(order.paidAt) : null,
+      createdAt: serverTimestamp(),
     })
   }
 
@@ -145,6 +187,9 @@ export async function seedSampleData() {
 }
 
 export async function clearSampleData() {
+  if (!isSeedEnabled()) {
+    throw new Error(SEED_DISABLED_MESSAGE)
+  }
   const db = getDb()
 
   const [usersSnap, productsSnap, ordersSnap] = await Promise.all([

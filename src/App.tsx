@@ -5,6 +5,7 @@ import {
   BellRing,
   CheckCircle2,
   ClipboardList,
+  Clock,
   Coins,
   CreditCard,
   Database,
@@ -32,6 +33,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
@@ -58,6 +67,7 @@ import {
 } from "@/components/ui/table"
 import { isFirebaseConfigured } from "@/lib/firebase"
 import {
+  confirmOrderPayment,
   createOrder,
   deleteOrder as deleteOrderDoc,
   subscribeOrders,
@@ -71,7 +81,8 @@ import {
   type ProductDoc,
   type UserDoc,
 } from "@/lib/firestore"
-import { clearSampleData, seedSampleData } from "@/lib/seed"
+import { withWriteFeedback } from "@/lib/mutations"
+import { clearSampleData, isSeedEnabled, seedSampleData } from "@/lib/seed"
 import { cn } from "@/lib/utils"
 import { ROLE_LABEL, usePreferences } from "@/hooks/usePreferences"
 import { SettingsDialog } from "@/components/SettingsDialog"
@@ -187,6 +198,17 @@ function deriveState(order: OrderDoc): DerivedOrderState {
   return "進行中"
 }
 
+const paymentStatusLabel: Record<OrderPaymentStatus, string> = {
+  unpaid: "未收款",
+  paid: "已結清",
+  pending_confirmation: "待老闆確認",
+}
+
+function driverLabel(driverId: string | null, drivers: UserDoc[]) {
+  if (!driverId) return "未指派"
+  return drivers.find((u) => u.id === driverId)?.displayName ?? driverId
+}
+
 function summarizeItems(items: OrderItem[]) {
   if (items.length === 0) return "-"
   const head = items[0].productName + (items[0].spec ? ` (${items[0].spec})` : "")
@@ -245,6 +267,8 @@ function DashboardApp() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [activeView, setActiveView] = useState<ViewKey>(prefs.defaultView)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [confirmTarget, setConfirmTarget] = useState<OrderDoc | null>(null)
+  const seedEnabled = isSeedEnabled()
 
   useEffect(() => {
     const unsubOrders = subscribeOrders(
@@ -329,35 +353,39 @@ function DashboardApp() {
 
     setBusy(true)
     try {
-      if (editingId) {
-        await updateOrder(editingId, {
-          customerId,
-          customerName,
-          driverId,
-          items,
-          totalAmount,
-          paymentStatus,
-          paymentMethod,
-          orderDate,
-          deliveryDate,
-        })
+      const result = editingId
+        ? await withWriteFeedback("更新訂單", () =>
+            updateOrder(editingId, {
+              customerId,
+              customerName,
+              driverId,
+              items,
+              totalAmount,
+              paymentStatus,
+              paymentMethod,
+              orderDate,
+              deliveryDate,
+            }),
+          )
+        : await withWriteFeedback("新增訂單", () =>
+            createOrder({
+              customerId,
+              customerName,
+              driverId,
+              items,
+              totalAmount,
+              paymentStatus,
+              paymentMethod,
+              orderDate,
+              deliveryDate,
+            }),
+          )
+      if (result === null) {
+        setLoadError("訂單儲存失敗，請查看右上角通知或瀏覽器主控台。")
       } else {
-        await createOrder({
-          customerId,
-          customerName,
-          driverId,
-          items,
-          totalAmount,
-          paymentStatus,
-          paymentMethod,
-          orderDate,
-          deliveryDate,
-        })
+        resetForm()
+        setActiveView("overview")
       }
-      resetForm()
-      setActiveView("overview")
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
     }
@@ -394,10 +422,20 @@ function DashboardApp() {
     if (!window.confirm(`確定刪除「${target.customerName} - ${summarizeItems(target.items)}」？`)) return
     setBusy(true)
     try {
-      await deleteOrderDoc(orderId)
-      if (editingId === orderId) resetForm()
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err))
+      const result = await withWriteFeedback("刪除訂單", () => deleteOrderDoc(orderId))
+      if (result !== null && editingId === orderId) resetForm()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const confirmPayment = async (orderId: string, method: OrderPaymentMethod) => {
+    setBusy(true)
+    try {
+      const result = await withWriteFeedback("確認入帳", () =>
+        confirmOrderPayment(orderId, method),
+      )
+      if (result !== null) setConfirmTarget(null)
     } finally {
       setBusy(false)
     }
@@ -407,9 +445,7 @@ function DashboardApp() {
     if (!window.confirm("將寫入範例 Users / Products / Orders 至 Firestore (ID 帶 SEED_ 前綴可辨認)，確認繼續？")) return
     setBusy(true)
     try {
-      await seedSampleData()
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err))
+      await withWriteFeedback("寫入範例資料", () => seedSampleData())
     } finally {
       setBusy(false)
     }
@@ -419,10 +455,8 @@ function DashboardApp() {
     if (!window.confirm("將刪除所有 ID 以 SEED_ 開頭的範例資料 (你手動建立的訂單不會被動到)，確認繼續？")) return
     setBusy(true)
     try {
-      const result = await clearSampleData()
-      window.alert(`已刪除 ${result.deleted} 筆範例資料。`)
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err))
+      const result = await withWriteFeedback("清除範例資料", () => clearSampleData())
+      if (result !== null) window.alert(`已刪除 ${result.deleted} 筆範例資料。`)
     } finally {
       setBusy(false)
     }
@@ -434,9 +468,13 @@ function DashboardApp() {
 
     const todayOrders = orders.filter((order) => isSameDay(order.orderDate, todayDate))
     const todayPaid = todayOrders.filter((order) => order.paymentStatus === "paid")
-    const todayUnpaid = todayOrders.filter((order) => order.paymentStatus === "unpaid")
+    const todayUnpaid = todayOrders.filter((order) => order.paymentStatus !== "paid")
 
     const unpaidOrders = orders.filter((order) => order.paymentStatus === "unpaid")
+    const pendingConfirmationOrders = orders.filter(
+      (order) => order.paymentStatus === "pending_confirmation",
+    )
+    const outstandingOrders = orders.filter((order) => order.paymentStatus !== "paid")
     const pendingShipments = orders.filter((order) => !order.deliveryDate)
     const todayDeliveries = orders.filter(
       (order) => order.deliveryDate && isSameDay(order.deliveryDate, todayDate),
@@ -458,7 +496,7 @@ function DashboardApp() {
     }))
     const paymentMethodTotal = paymentMethodStats.reduce((acc, item) => acc + item.amount, 0)
 
-    const stalestUnpaid = unpaidOrders
+    const stalestUnpaid = outstandingOrders
       .map((order) => ({
         order,
         days: daysBetween(todayDate, order.orderDate),
@@ -476,13 +514,15 @@ function DashboardApp() {
       todayReceivableAmount: sum(todayOrders),
       todayPaidAmount: sum(todayPaid),
       todayUnpaidAmount: sum(todayUnpaid),
-      totalUnpaidAmount: sum(unpaidOrders),
+      totalUnpaidAmount: sum(outstandingOrders),
       monthPaidAmount: sum(monthPaidOrders),
       pendingShipmentsCount: pendingShipments.length,
       activeOrderCount: orders.filter((order) => order.paymentStatus !== "paid" || !order.deliveryDate).length,
       todayDeliveries,
       pendingShipments,
       unpaidOrders,
+      pendingConfirmationOrders,
+      outstandingOrders,
       stalestUnpaid: stalestUnpaid.map((item) => item.order),
       paymentMethodStats,
       paymentMethodTotal,
@@ -569,8 +609,8 @@ function DashboardApp() {
                     <Icon />
                     {item.label}
                   </span>
-                  {item.key === "payments" && dashboard.unpaidOrders.length > 0 ? (
-                    <Badge variant="secondary">{dashboard.unpaidOrders.length}</Badge>
+                  {item.key === "payments" && dashboard.outstandingOrders.length > 0 ? (
+                    <Badge variant="secondary">{dashboard.outstandingOrders.length}</Badge>
                   ) : null}
                 </button>
               )
@@ -608,23 +648,25 @@ function DashboardApp() {
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                {orders.length === 0 && products.length === 0 && users.length === 0 ? (
-                  <Button type="button" variant="default" size="sm" onClick={handleSeed} disabled={busy}>
-                    <Database data-icon="inline-start" />
-                    寫入範例資料
-                  </Button>
-                ) : (
-                  <>
-                    <Button type="button" variant="outline" size="sm" onClick={handleSeed} disabled={busy}>
-                      <RefreshCw data-icon="inline-start" />
-                      補充範例
+                {seedEnabled ? (
+                  orders.length === 0 && products.length === 0 && users.length === 0 ? (
+                    <Button type="button" variant="default" size="sm" onClick={handleSeed} disabled={busy}>
+                      <Database data-icon="inline-start" />
+                      寫入範例資料
                     </Button>
-                    <Button type="button" variant="outline" size="sm" onClick={handleClearSeed} disabled={busy}>
-                      <Trash2 data-icon="inline-start" />
-                      清除範例
-                    </Button>
-                  </>
-                )}
+                  ) : (
+                    <>
+                      <Button type="button" variant="outline" size="sm" onClick={handleSeed} disabled={busy}>
+                        <RefreshCw data-icon="inline-start" />
+                        補充範例
+                      </Button>
+                      <Button type="button" variant="outline" size="sm" onClick={handleClearSeed} disabled={busy}>
+                        <Trash2 data-icon="inline-start" />
+                        清除範例
+                      </Button>
+                    </>
+                  )
+                ) : null}
               </div>
             </header>
 
@@ -686,11 +728,12 @@ function DashboardApp() {
 
             {activeView === "payments" ? (
               <PaymentsView
-                unpaidOrders={dashboard.unpaidOrders}
+                outstandingOrders={dashboard.outstandingOrders}
                 drivers={drivers}
                 today={todayDate}
                 onEdit={editOrder}
                 onDelete={removeOrder}
+                onConfirmPayment={(order) => setConfirmTarget(order)}
               />
             ) : null}
 
@@ -726,6 +769,15 @@ function DashboardApp() {
       </div>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <ConfirmPaymentDialog
+        order={confirmTarget}
+        open={confirmTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setConfirmTarget(null)
+        }}
+        onConfirm={confirmPayment}
+        busy={busy}
+      />
     </main>
   )
 }
@@ -828,15 +880,115 @@ function KpiCard({ item }: { item: KpiItem }) {
   )
 }
 
-function StatusBadge({ children, tone }: { children: string; tone: "default" | "muted" | "danger" }) {
+function StatusBadge({ children, tone }: { children: string; tone: "default" | "muted" | "danger" | "warning" }) {
+  if (tone === "warning") {
+    return (
+      <Badge
+        variant="outline"
+        className="gap-1 border-amber-500/40 bg-amber-100 text-amber-900 dark:bg-amber-500/15 dark:text-amber-200"
+      >
+        <Clock className="size-3" />
+        {children}
+      </Badge>
+    )
+  }
   const variant = tone === "danger" ? "destructive" : tone === "muted" ? "secondary" : "outline"
   return <Badge variant={variant}>{children}</Badge>
 }
 
-function stateTone(state: DerivedOrderState) {
-  if (state === "已完成") return "default" as const
-  if (state === "待收款") return "muted" as const
-  return "danger" as const
+function PaymentStatusBadge({ status }: { status: OrderPaymentStatus }) {
+  if (status === "pending_confirmation") {
+    return <StatusBadge tone="warning">{paymentStatusLabel.pending_confirmation}</StatusBadge>
+  }
+  if (status === "paid") {
+    return <StatusBadge tone="default">{paymentStatusLabel.paid}</StatusBadge>
+  }
+  return <StatusBadge tone="muted">{paymentStatusLabel.unpaid}</StatusBadge>
+}
+
+function stateTone(state: DerivedOrderState): "default" | "muted" | "danger" | "warning" {
+  if (state === "已完成") return "default"
+  if (state === "待收款") return "muted"
+  return "danger"
+}
+
+function ConfirmPaymentDialog({
+  order,
+  open,
+  onOpenChange,
+  onConfirm,
+  busy,
+}: {
+  order: OrderDoc | null
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onConfirm: (orderId: string, method: OrderPaymentMethod) => Promise<void> | void
+  busy: boolean
+}) {
+  const [method, setMethod] = useState<OrderPaymentMethod>("cash")
+
+  useEffect(() => {
+    if (open) setMethod("cash")
+  }, [open, order?.id])
+
+  if (!order) return null
+
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    await onConfirm(order.id, method)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          <DialogHeader>
+            <DialogTitle>確認入帳</DialogTitle>
+            <DialogDescription>
+              確認 <span className="font-medium text-foreground">{order.customerName}</span> 已收款後，
+              系統會將狀態改為「已結清」並紀錄入帳時間。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center justify-between rounded-lg border bg-muted/40 p-3 text-sm">
+              <span className="text-muted-foreground">訂單金額</span>
+              <span className="font-semibold tabular-nums">{money(order.totalAmount)}</span>
+            </div>
+            <Field label="付款方式">
+              <Select
+                value={method}
+                onValueChange={(value) => {
+                  if (value) setMethod(value as OrderPaymentMethod)
+                }}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {paymentMethodOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </Field>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+              取消
+            </Button>
+            <Button type="submit" disabled={busy}>
+              <CheckCircle2 data-icon="inline-start" />
+              確認入帳
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -918,6 +1070,8 @@ type DashboardShape = {
   todayDeliveries: OrderDoc[]
   pendingShipments: OrderDoc[]
   unpaidOrders: OrderDoc[]
+  pendingConfirmationOrders: OrderDoc[]
+  outstandingOrders: OrderDoc[]
   stalestUnpaid: OrderDoc[]
   paymentMethodStats: Array<{ method: OrderPaymentMethod; label: string; amount: number }>
   paymentMethodTotal: number
@@ -1305,6 +1459,7 @@ function EntryView({
                 <SelectContent>
                   <SelectGroup>
                     <SelectItem value="unpaid">未收款</SelectItem>
+                    <SelectItem value="pending_confirmation">待老闆確認</SelectItem>
                     <SelectItem value="paid">已結清</SelectItem>
                   </SelectGroup>
                 </SelectContent>
@@ -1355,25 +1510,49 @@ function EntryView({
   )
 }
 
+type PaymentsFilter = "all" | "unpaid" | "pending_confirmation"
+type DriverFilter = string // "all" | "unassigned" | <driverId>
+
 function PaymentsView({
-  unpaidOrders,
+  outstandingOrders,
   drivers,
   today,
   onEdit,
   onDelete,
+  onConfirmPayment,
 }: {
-  unpaidOrders: OrderDoc[]
+  outstandingOrders: OrderDoc[]
   drivers: UserDoc[]
   today: Date
   onEdit: (order: OrderDoc) => void
   onDelete: (id: string) => void
+  onConfirmPayment: (order: OrderDoc) => void
 }) {
-  const driverName = (driverId: string | null) => {
-    if (!driverId) return "未指派"
-    return drivers.find((u) => u.id === driverId)?.displayName ?? driverId
-  }
+  const [statusFilter, setStatusFilter] = useState<PaymentsFilter>("all")
+  const [driverFilter, setDriverFilter] = useState<DriverFilter>("all")
+
+  const driverName = (driverId: string | null) => driverLabel(driverId, drivers)
   const paymentMethodLabel = (method: OrderPaymentMethod | null) =>
     paymentMethodOptions.find((opt) => opt.value === method)?.label ?? ""
+
+  const unpaidCount = useMemo(
+    () => outstandingOrders.filter((o) => o.paymentStatus === "unpaid").length,
+    [outstandingOrders],
+  )
+  const pendingCount = useMemo(
+    () =>
+      outstandingOrders.filter((o) => o.paymentStatus === "pending_confirmation").length,
+    [outstandingOrders],
+  )
+
+  const filteredOrders = useMemo(() => {
+    return outstandingOrders.filter((order) => {
+      if (statusFilter !== "all" && order.paymentStatus !== statusFilter) return false
+      if (driverFilter === "all") return true
+      if (driverFilter === "unassigned") return order.driverId === null
+      return order.driverId === driverFilter
+    })
+  }, [outstandingOrders, statusFilter, driverFilter])
 
   const exportColumns: ExportColumn<OrderDoc>[] = [
     { key: "customer", label: "客戶", getValue: (o) => o.customerName },
@@ -1385,7 +1564,7 @@ function PaymentsView({
       key: "paymentStatus",
       label: "收款",
       getValue: (o) => o.paymentStatus,
-      formatText: (o) => (o.paymentStatus === "paid" ? "已結清" : "未收款"),
+      formatText: (o) => paymentStatusLabel[o.paymentStatus],
     },
     {
       key: "paymentMethod",
@@ -1401,14 +1580,63 @@ function PaymentsView({
     },
   ]
 
+  const chips: Array<{ key: PaymentsFilter; label: string; count: number }> = [
+    { key: "all", label: "全部", count: outstandingOrders.length },
+    { key: "unpaid", label: "未收款", count: unpaidCount },
+    { key: "pending_confirmation", label: "待老闆確認", count: pendingCount },
+  ]
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>未收款追蹤</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap gap-1.5">
+            {chips.map((chip) => (
+              <Button
+                key={chip.key}
+                type="button"
+                size="sm"
+                variant={statusFilter === chip.key ? "default" : "outline"}
+                onClick={() => setStatusFilter(chip.key)}
+              >
+                {chip.label}
+                <Badge variant="secondary" className="ml-1.5">
+                  {chip.count}
+                </Badge>
+              </Button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2 sm:ml-auto">
+            <Label className="text-xs text-muted-foreground">司機</Label>
+            <Select
+              value={driverFilter}
+              onValueChange={(value) => {
+                if (value) setDriverFilter(value)
+              }}
+            >
+              <SelectTrigger className="w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value="all">全部司機</SelectItem>
+                  <SelectItem value="unassigned">未指派</SelectItem>
+                  {drivers.map((driver) => (
+                    <SelectItem key={driver.id} value={driver.id}>
+                      {driver.displayName}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
         <ExportBar
-          rows={unpaidOrders}
+          rows={filteredOrders}
           columns={exportColumns}
           filename="未收款追蹤"
           title="未收款追蹤"
@@ -1421,15 +1649,16 @@ function PaymentsView({
               <TableHead className="text-right">金額</TableHead>
               <TableHead>下單日</TableHead>
               <TableHead>距今</TableHead>
-              <TableHead>出貨狀態</TableHead>
+              <TableHead>司機</TableHead>
+              <TableHead>狀態</TableHead>
               <TableHead className="text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {unpaidOrders.length === 0 ? (
-              <EmptyRow colSpan={7} text="目前沒有未收款訂單。" />
+            {filteredOrders.length === 0 ? (
+              <EmptyRow colSpan={8} text="目前沒有符合條件的訂單。" />
             ) : (
-              unpaidOrders.map((order) => {
+              filteredOrders.map((order) => {
                 const days = daysBetween(today, order.orderDate)
                 return (
                   <TableRow key={order.id}>
@@ -1440,13 +1669,21 @@ function PaymentsView({
                     </TableCell>
                     <TableCell>{formatDate(order.orderDate)}</TableCell>
                     <TableCell>{days > 0 ? `${days} 天` : "今日"}</TableCell>
+                    <TableCell>{driverName(order.driverId)}</TableCell>
                     <TableCell>
-                      <StatusBadge tone={order.deliveryDate ? "muted" : "danger"}>
-                        {order.deliveryDate ? "已出貨" : "未出貨"}
-                      </StatusBadge>
+                      <PaymentStatusBadge status={order.paymentStatus} />
                     </TableCell>
                     <TableCell>
-                      <RowActions order={order} onEdit={onEdit} onDelete={onDelete} />
+                      <RowActions
+                        order={order}
+                        onEdit={onEdit}
+                        onDelete={onDelete}
+                        onConfirmPayment={
+                          order.paymentStatus === "pending_confirmation"
+                            ? () => onConfirmPayment(order)
+                            : undefined
+                        }
+                      />
                     </TableCell>
                   </TableRow>
                 )
@@ -1518,10 +1755,7 @@ function ShipmentsView({
   onEdit: (order: OrderDoc) => void
   onDelete: (id: string) => void
 }) {
-  const driverName = (driverId: string | null) => {
-    if (!driverId) return "未指派"
-    return drivers.find((u) => u.id === driverId)?.displayName ?? driverId
-  }
+  const driverName = (driverId: string | null) => driverLabel(driverId, drivers)
 
   const aggregated = useMemo(() => aggregatePendingItems(pendingShipments), [pendingShipments])
   const totalProductTypes = aggregated.length
@@ -1548,7 +1782,7 @@ function ShipmentsView({
       key: "paymentStatus",
       label: "收款",
       getValue: (o) => o.paymentStatus,
-      formatText: (o) => (o.paymentStatus === "paid" ? "已結清" : "未收款"),
+      formatText: (o) => paymentStatusLabel[o.paymentStatus],
     },
     {
       key: "waited",
@@ -1702,9 +1936,7 @@ function ShipmentsView({
                       </TableCell>
                       <TableCell className="py-3">{driverName(order.driverId)}</TableCell>
                       <TableCell className="py-3">
-                        <StatusBadge tone={order.paymentStatus === "paid" ? "default" : "muted"}>
-                          {order.paymentStatus === "paid" ? "已結清" : "未收款"}
-                        </StatusBadge>
+                        <PaymentStatusBadge status={order.paymentStatus} />
                       </TableCell>
                       <TableCell className="py-3">
                         <RowActions order={order} onEdit={onEdit} onDelete={onDelete} />
@@ -1846,9 +2078,7 @@ function AlertsView({
                     </TableCell>
                     <TableCell>{daysBetween(today, order.orderDate)} 天</TableCell>
                     <TableCell>
-                      <StatusBadge tone={order.deliveryDate ? "muted" : "danger"}>
-                        {order.deliveryDate ? "已出貨" : "未出貨"}
-                      </StatusBadge>
+                      <PaymentStatusBadge status={order.paymentStatus} />
                     </TableCell>
                   </TableRow>
                 ))
@@ -1917,13 +2147,21 @@ function RowActions({
   order,
   onEdit,
   onDelete,
+  onConfirmPayment,
 }: {
   order: OrderDoc
   onEdit: (order: OrderDoc) => void
   onDelete: (id: string) => void
+  onConfirmPayment?: () => void
 }) {
   return (
     <div className="flex justify-end gap-1">
+      {onConfirmPayment ? (
+        <Button type="button" size="sm" onClick={onConfirmPayment}>
+          <CheckCircle2 data-icon="inline-start" />
+          確認入帳
+        </Button>
+      ) : null}
       <Button type="button" variant="ghost" size="icon-sm" onClick={() => onEdit(order)} aria-label="編輯">
         <Pencil />
       </Button>
