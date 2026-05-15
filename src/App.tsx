@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import {
   AlertTriangle,
-  BarChart3,
-  BellRing,
   CheckCircle2,
   ClipboardList,
   Clock,
@@ -12,16 +10,19 @@ import {
   FilePenLine,
   Home,
   LayoutDashboard,
+  Lightbulb,
   Package,
   PackageCheck,
   Pencil,
   Plus,
   RefreshCw,
   Save,
+  Search,
   Sparkles,
   Trash2,
   Truck,
   Undo2,
+  Users,
   Wallet,
 } from "lucide-react"
 
@@ -105,7 +106,23 @@ const paymentMethodOptions: Array<{ value: OrderPaymentMethod; label: string }> 
   { value: "check", label: "支票" },
 ]
 
-type ViewKey = "overview" | "entry" | "payments" | "shipments" | "analytics" | "alerts"
+type ViewKey = "overview" | "entry" | "operations" | "customers" | "insights"
+
+// Legacy keys can still surface from cached Gemini/Claude responses written
+// before the navigation was reorganized — coerce them here so the AI panel's
+// "前往帳款" buttons keep landing somewhere sensible instead of a blank screen.
+const LEGACY_VIEW_KEY_MAP: Record<string, ViewKey> = {
+  payments: "operations",
+  shipments: "operations",
+  analytics: "insights",
+  alerts: "insights",
+}
+
+function coerceViewKey(value: string): ViewKey {
+  if (value in LEGACY_VIEW_KEY_MAP) return LEGACY_VIEW_KEY_MAP[value]
+  const allowed: ViewKey[] = ["overview", "entry", "operations", "customers", "insights"]
+  return (allowed as string[]).includes(value) ? (value as ViewKey) : "overview"
+}
 
 type ItemFormRow = {
   productId: string
@@ -146,10 +163,9 @@ const numberFormatter = new Intl.NumberFormat("zh-TW")
 const navigationItems: Array<{ key: ViewKey; label: string; icon: typeof LayoutDashboard }> = [
   { key: "overview", label: "總覽", icon: LayoutDashboard },
   { key: "entry", label: "填寫資料", icon: FilePenLine },
-  { key: "payments", label: "帳款", icon: CreditCard },
-  { key: "shipments", label: "出貨", icon: Truck },
-  { key: "analytics", label: "分析", icon: BarChart3 },
-  { key: "alerts", label: "提醒", icon: BellRing },
+  { key: "operations", label: "訂單作業", icon: ClipboardList },
+  { key: "customers", label: "客戶", icon: Users },
+  { key: "insights", label: "洞察", icon: Lightbulb },
 ]
 
 function toLocalDateString(date: Date) {
@@ -278,7 +294,24 @@ function DashboardApp() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [confirmTarget, setConfirmTarget] = useState<OrderDoc | null>(null)
   const [deliveryTarget, setDeliveryTarget] = useState<OrderDoc | null>(null)
+  // Customer drill-in lives at app scope so any view (overview, operations,
+  // insights, customers list) can hand off to the customer history dialog
+  // without prop-drilling through every table.
+  const [historyCustomer, setHistoryCustomer] = useState<string | null>(null)
+  // Last-save status surfaced on the entry form so the boss has positive
+  // feedback after submitting without us yanking them off the page.
+  const [entryFlash, setEntryFlash] = useState<{ kind: "created" | "updated"; customerName: string } | null>(null)
   const seedEnabled = isSeedEnabled()
+
+  // Auto-dismiss the entry-flash banner after a few seconds so a stale
+  // "已新增 X 的訂單" doesn't haunt the next save. The timer lives in
+  // DashboardApp scope so leaving and re-entering the entry tab can't
+  // resurrect a long-dead flash — it'll have cleared by then.
+  useEffect(() => {
+    if (!entryFlash) return
+    const timer = window.setTimeout(() => setEntryFlash(null), 4000)
+    return () => window.clearTimeout(timer)
+  }, [entryFlash])
 
   useEffect(() => {
     const unsubOrders = subscribeOrders(
@@ -426,8 +459,14 @@ function DashboardApp() {
       if (result === null) {
         setLoadError("訂單儲存失敗，請查看右上角通知或瀏覽器主控台。")
       } else {
+        // Stay on the entry view so the boss can keep adding orders. Edit
+        // mode submits also land here — the form resets to a fresh blank
+        // entry and the flash confirms what was saved.
+        setEntryFlash({
+          kind: editingId ? "updated" : "created",
+          customerName,
+        })
         resetForm()
-        setActiveView("overview")
       }
     } finally {
       setBusy(false)
@@ -508,6 +547,14 @@ function DashboardApp() {
     }
   }
 
+  // Single entry point for "show me this customer's history." All tables
+  // funnel through this so the dialog state stays in one place.
+  const openCustomerHistory = (customerName: string) => {
+    const trimmed = customerName.trim()
+    if (!trimmed) return
+    setHistoryCustomer(trimmed)
+  }
+
   const handleSeed = async () => {
     if (!window.confirm("將寫入範例 Users / Products / Orders 至 Firestore (ID 帶 SEED_ 前綴可辨認)，確認繼續？")) return
     setBusy(true)
@@ -577,6 +624,13 @@ function DashboardApp() {
     }, {})
     const topOverdueCustomer = Object.entries(overdueByCustomer).sort((a, b) => b[1] - a[1])[0]
 
+    // Orders that need the boss's attention: anything not paid OR not
+    // shipped. Used to drive the operations-tab badge and the unified
+    // "action required" list in OperationsView.
+    const actionRequiredOrders = orders.filter(
+      (order) => order.paymentStatus !== "paid" || !order.deliveryDate,
+    )
+
     return {
       todayReceivableAmount: sum(todayOrders),
       todayPaidAmount: sum(todayPaid),
@@ -584,13 +638,16 @@ function DashboardApp() {
       totalUnpaidAmount: sum(outstandingOrders),
       monthPaidAmount: sum(monthPaidOrders),
       pendingShipmentsCount: pendingShipments.length,
-      activeOrderCount: orders.filter((order) => order.paymentStatus !== "paid" || !order.deliveryDate).length,
+      activeOrderCount: actionRequiredOrders.length,
+      actionRequiredOrders,
+      actionRequiredCount: actionRequiredOrders.length,
       todayDeliveries,
       pendingShipments,
       unpaidOrders,
       pendingConfirmationOrders,
       outstandingOrders,
       stalestUnpaid: stalestUnpaid.map((item) => item.order),
+      overdueByCustomer,
       paymentMethodStats,
       paymentMethodTotal,
       topOverdueCustomer,
@@ -676,8 +733,8 @@ function DashboardApp() {
                     <Icon />
                     {item.label}
                   </span>
-                  {item.key === "payments" && dashboard.outstandingOrders.length > 0 ? (
-                    <Badge variant="secondary">{dashboard.outstandingOrders.length}</Badge>
+                  {item.key === "operations" && dashboard.actionRequiredCount > 0 ? (
+                    <Badge variant="secondary">{dashboard.actionRequiredCount}</Badge>
                   ) : null}
                 </button>
               )
@@ -772,6 +829,7 @@ function DashboardApp() {
                 today={todayDate}
                 onEdit={editOrder}
                 onDelete={removeOrder}
+                onSelectCustomer={openCustomerHistory}
                 paymentColors={paymentColors}
               />
             ) : null}
@@ -791,46 +849,43 @@ function DashboardApp() {
                 driverLabelOptions={driverLabelSuggestions}
                 products={activeProducts}
                 busy={busy}
+                flash={entryFlash}
+                onDismissFlash={() => setEntryFlash(null)}
               />
             ) : null}
 
-            {activeView === "payments" ? (
-              <PaymentsView
-                outstandingOrders={dashboard.outstandingOrders}
+            {activeView === "operations" ? (
+              <OperationsView
+                actionRequiredOrders={dashboard.actionRequiredOrders}
                 today={todayDate}
                 onEdit={editOrder}
                 onDelete={removeOrder}
                 onConfirmPayment={(order) => setConfirmTarget(order)}
                 onMarkDelivered={(order) => setDeliveryTarget(order)}
                 onResetDelivery={undoDelivery}
+                onSelectCustomer={openCustomerHistory}
               />
             ) : null}
 
-            {activeView === "shipments" ? (
-              <ShipmentsView
-                pendingShipments={dashboard.pendingShipments}
-                onEdit={editOrder}
-                onDelete={removeOrder}
-                onMarkDelivered={(order) => setDeliveryTarget(order)}
-              />
-            ) : null}
-
-            {activeView === "analytics" ? (
-              <AnalyticsView
+            {activeView === "customers" ? (
+              <CustomersView
                 orders={orders}
-                dashboard={dashboard}
-                paymentColors={paymentColors}
+                users={users}
+                today={todayDate}
+                onSelectCustomer={openCustomerHistory}
               />
             ) : null}
 
-            {activeView === "alerts" ? (
-              <AlertsView
-                stalestUnpaid={dashboard.stalestUnpaid}
-                today={todayDate}
+            {activeView === "insights" ? (
+              <InsightsView
                 orders={orders}
                 products={products}
                 users={users}
-                onNavigate={(view) => setActiveView(view as ViewKey)}
+                dashboard={dashboard}
+                paymentColors={paymentColors}
+                today={todayDate}
+                onSelectCustomer={openCustomerHistory}
+                onNavigate={(view) => setActiveView(coerceViewKey(view))}
               />
             ) : null}
           </div>
@@ -856,6 +911,29 @@ function DashboardApp() {
         onConfirm={markDelivered}
         suggestions={driverLabelSuggestions}
         busy={busy}
+      />
+      <CustomerHistoryDialog
+        customerName={historyCustomer}
+        orders={orders}
+        today={todayDate}
+        open={historyCustomer !== null}
+        onOpenChange={(open) => {
+          if (!open) setHistoryCustomer(null)
+        }}
+        onEdit={(order) => {
+          setHistoryCustomer(null)
+          editOrder(order)
+        }}
+        onConfirmPayment={(order) => {
+          setHistoryCustomer(null)
+          setConfirmTarget(order)
+        }}
+        onMarkDelivered={(order) => {
+          setHistoryCustomer(null)
+          setDeliveryTarget(order)
+        }}
+        onResetDelivery={undoDelivery}
+        onDelete={removeOrder}
       />
     </main>
   )
@@ -1221,12 +1299,15 @@ type DashboardShape = {
   monthPaidAmount: number
   pendingShipmentsCount: number
   activeOrderCount: number
+  actionRequiredOrders: OrderDoc[]
+  actionRequiredCount: number
   todayDeliveries: OrderDoc[]
   pendingShipments: OrderDoc[]
   unpaidOrders: OrderDoc[]
   pendingConfirmationOrders: OrderDoc[]
   outstandingOrders: OrderDoc[]
   stalestUnpaid: OrderDoc[]
+  overdueByCustomer: Record<string, number>
   paymentMethodStats: Array<{ method: OrderPaymentMethod; label: string; amount: number }>
   paymentMethodTotal: number
   topOverdueCustomer: [string, number] | undefined
@@ -1241,6 +1322,7 @@ function OverviewView({
   today,
   onEdit,
   onDelete,
+  onSelectCustomer,
   paymentColors,
 }: {
   kpiItems: KpiItem[]
@@ -1251,6 +1333,7 @@ function OverviewView({
   today: Date
   onEdit: (order: OrderDoc) => void
   onDelete: (id: string) => void
+  onSelectCustomer: (customerName: string) => void
   paymentColors: string[]
 }) {
   const stateBuckets: DerivedOrderState[] = ["進行中", "待收款", "已完成"]
@@ -1269,7 +1352,13 @@ function OverviewView({
             <CardTitle>近期訂單</CardTitle>
           </CardHeader>
           <CardContent>
-            <CompactOrderTable orders={recentOrders} today={today} onEdit={onEdit} onDelete={onDelete} />
+            <CompactOrderTable
+              orders={recentOrders}
+              today={today}
+              onEdit={onEdit}
+              onDelete={onDelete}
+              onSelectCustomer={onSelectCustomer}
+            />
           </CardContent>
         </Card>
 
@@ -1487,6 +1576,8 @@ function EntryView({
   driverLabelOptions,
   products,
   busy,
+  flash,
+  onDismissFlash,
 }: {
   editingId: string | null
   form: OrderFormData
@@ -1501,6 +1592,8 @@ function EntryView({
   driverLabelOptions: string[]
   products: ProductDoc[]
   busy: boolean
+  flash: { kind: "created" | "updated"; customerName: string } | null
+  onDismissFlash: () => void
 }) {
   const total = form.items.reduce((sum, row) => sum + rowSubtotal(row), 0)
 
@@ -1526,6 +1619,22 @@ function EntryView({
         </CardAction>
       </CardHeader>
       <CardContent>
+        {flash ? (
+          <button
+            type="button"
+            onClick={onDismissFlash}
+            className="mb-4 flex w-full items-center gap-2 rounded-lg border border-chart-1/40 bg-chart-1/10 px-3 py-2 text-left text-sm transition-colors hover:bg-chart-1/15"
+            aria-label="關閉提示"
+            role="status"
+          >
+            <CheckCircle2 className="size-4 shrink-0 text-chart-1" />
+            <span className="text-foreground">
+              已{flash.kind === "updated" ? "更新" : "新增"}
+              <span className="mx-1 font-medium">{flash.customerName}</span>
+              的訂單，可以直接繼續新增下一筆。
+            </span>
+          </button>
+        ) : null}
         <form className="flex flex-col gap-5" onSubmit={submitOrder}>
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             <Field label="客戶名稱">
@@ -1626,14 +1735,28 @@ function EntryView({
                           <SelectTrigger className="w-32 shrink-0">
                             <SelectValue placeholder="選單" />
                           </SelectTrigger>
-                          <SelectContent>
+                          {/* Override the auto-anchor width so the dropdown is
+                              wide enough to show 「商品·規格」 without truncation. */}
+                          <SelectContent
+                            alignItemWithTrigger={false}
+                            className="w-[min(22rem,calc(100vw-2rem))]"
+                          >
                             <SelectGroup>
                               <SelectItem value="manual">自訂</SelectItem>
-                              {products.map((product) => (
-                                <SelectItem key={product.id} value={product.id}>
-                                  {product.productName}
-                                </SelectItem>
-                              ))}
+                              {products.map((product) => {
+                                // Many products share a name and differ only by
+                                // spec (e.g. 「水泥」 vs 「水泥 (40kg)」). Showing
+                                // the spec inline disambiguates the dropdown so
+                                // the boss doesn't pick the wrong SKU.
+                                const label = product.spec
+                                  ? `${product.productName}・${product.spec}`
+                                  : product.productName
+                                return (
+                                  <SelectItem key={product.id} value={product.id}>
+                                    {label}
+                                  </SelectItem>
+                                )
+                              })}
                             </SelectGroup>
                           </SelectContent>
                         </Select>
@@ -1754,210 +1877,6 @@ function EntryView({
   )
 }
 
-type PaymentsFilter = "all" | "unpaid" | "pending_confirmation"
-type DriverFilter = string // "all" | "unassigned" | <driverId>
-
-function PaymentsView({
-  outstandingOrders,
-  today,
-  onEdit,
-  onDelete,
-  onConfirmPayment,
-  onMarkDelivered,
-  onResetDelivery,
-}: {
-  outstandingOrders: OrderDoc[]
-  today: Date
-  onEdit: (order: OrderDoc) => void
-  onDelete: (id: string) => void
-  onConfirmPayment: (order: OrderDoc) => void
-  onMarkDelivered: (order: OrderDoc) => void
-  onResetDelivery: (id: string) => void
-}) {
-  const [statusFilter, setStatusFilter] = useState<PaymentsFilter>("all")
-  const [driverFilter, setDriverFilter] = useState<DriverFilter>("all")
-
-  const driverName = (driverId: string | null) => deliveryPersonLabel(driverId)
-  const paymentMethodLabel = (method: OrderPaymentMethod | null) =>
-    paymentMethodOptions.find((opt) => opt.value === method)?.label ?? ""
-
-  const driverOptions = useMemo(() => {
-    const set = new Set<string>()
-    for (const o of outstandingOrders) {
-      if (o.driverId && o.driverId.trim()) set.add(o.driverId.trim())
-    }
-    return Array.from(set).sort()
-  }, [outstandingOrders])
-
-  const unpaidCount = useMemo(
-    () => outstandingOrders.filter((o) => o.paymentStatus === "unpaid").length,
-    [outstandingOrders],
-  )
-  const pendingCount = useMemo(
-    () =>
-      outstandingOrders.filter((o) => o.paymentStatus === "pending_confirmation").length,
-    [outstandingOrders],
-  )
-
-  const filteredOrders = useMemo(() => {
-    return outstandingOrders.filter((order) => {
-      if (statusFilter !== "all" && order.paymentStatus !== statusFilter) return false
-      if (driverFilter === "all") return true
-      if (driverFilter === "unassigned") {
-        return !order.driverId || !order.driverId.trim()
-      }
-      return (order.driverId ?? "").trim() === driverFilter
-    })
-  }, [outstandingOrders, statusFilter, driverFilter])
-
-  const exportColumns: ExportColumn<OrderDoc>[] = [
-    { key: "customer", label: "客戶", getValue: (o) => o.customerName },
-    { key: "items", label: "訂單品項", getValue: (o) => summarizeItems(o.items) },
-    { key: "amount", label: "訂單金額", getValue: (o) => o.totalAmount },
-    { key: "orderDate", label: "下單日", getValue: (o) => o.orderDate },
-    { key: "driver", label: "送貨人員", getValue: (o) => driverName(o.driverId) },
-    {
-      key: "paymentStatus",
-      label: "收款",
-      getValue: (o) => o.paymentStatus,
-      formatText: (o) => paymentStatusLabel[o.paymentStatus],
-    },
-    {
-      key: "paymentMethod",
-      label: "付款方式",
-      getValue: (o) => paymentMethodLabel(o.paymentMethod),
-      defaultSelected: false,
-    },
-    {
-      key: "deliveryStatus",
-      label: "出貨狀態",
-      getValue: (o) => (o.deliveryDate ? "已出貨" : "未出貨"),
-      defaultSelected: false,
-    },
-  ]
-
-  const chips: Array<{ key: PaymentsFilter; label: string; count: number }> = [
-    { key: "all", label: "全部", count: outstandingOrders.length },
-    { key: "unpaid", label: "未收款", count: unpaidCount },
-    { key: "pending_confirmation", label: "待老闆確認", count: pendingCount },
-  ]
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>未收款追蹤</CardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="flex flex-wrap gap-1.5">
-            {chips.map((chip) => (
-              <Button
-                key={chip.key}
-                type="button"
-                size="sm"
-                variant={statusFilter === chip.key ? "default" : "outline"}
-                onClick={() => setStatusFilter(chip.key)}
-              >
-                {chip.label}
-                <Badge variant="secondary" className="ml-1.5">
-                  {chip.count}
-                </Badge>
-              </Button>
-            ))}
-          </div>
-          <div className="flex items-center gap-2 sm:ml-auto">
-            <Label className="text-xs text-muted-foreground">送貨人員</Label>
-            <Select
-              value={driverFilter}
-              onValueChange={(value) => {
-                if (value) setDriverFilter(value)
-              }}
-            >
-              <SelectTrigger className="w-40">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem value="all">全部</SelectItem>
-                  <SelectItem value="unassigned">未指派</SelectItem>
-                  {driverOptions.map((label) => (
-                    <SelectItem key={label} value={label}>
-                      {label}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-
-        <ExportBar
-          rows={filteredOrders}
-          columns={exportColumns}
-          filename="未收款追蹤"
-          title="未收款追蹤"
-        />
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>客戶</TableHead>
-              <TableHead>品項</TableHead>
-              <TableHead className="text-right">金額</TableHead>
-              <TableHead>下單日</TableHead>
-              <TableHead>距今</TableHead>
-              <TableHead>送貨人員</TableHead>
-              <TableHead>狀態</TableHead>
-              <TableHead className="text-right">操作</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {filteredOrders.length === 0 ? (
-              <EmptyRow colSpan={8} text="目前沒有符合條件的訂單。" />
-            ) : (
-              filteredOrders.map((order) => {
-                const days = daysBetween(today, order.orderDate)
-                return (
-                  <TableRow key={order.id}>
-                    <TableCell className="font-medium">{order.customerName}</TableCell>
-                    <TableCell>{summarizeItems(order.items)}</TableCell>
-                    <TableCell className="text-right font-medium tabular-nums">
-                      {money(order.totalAmount)}
-                    </TableCell>
-                    <TableCell>{formatDate(order.orderDate)}</TableCell>
-                    <TableCell>{days > 0 ? `${days} 天` : "今日"}</TableCell>
-                    <TableCell>{driverName(order.driverId)}</TableCell>
-                    <TableCell>
-                      <PaymentStatusBadge status={order.paymentStatus} />
-                    </TableCell>
-                    <TableCell>
-                      <RowActions
-                        order={order}
-                        onEdit={onEdit}
-                        onDelete={onDelete}
-                        onConfirmPayment={
-                          order.paymentStatus === "pending_confirmation"
-                            ? () => onConfirmPayment(order)
-                            : undefined
-                        }
-                        onMarkDelivered={
-                          order.deliveryDate ? undefined : () => onMarkDelivered(order)
-                        }
-                        onResetDelivery={
-                          order.deliveryDate ? () => onResetDelivery(order.id) : undefined
-                        }
-                      />
-                    </TableCell>
-                  </TableRow>
-                )
-              })
-            )}
-          </TableBody>
-        </Table>
-      </CardContent>
-    </Card>
-  )
-}
-
 type AggregatedItem = {
   productName: string
   spec: string
@@ -2006,33 +1925,118 @@ function aggregatePendingItems(orders: OrderDoc[]): AggregatedItem[] {
     .sort((a, b) => b.totalQuantity - a.totalQuantity)
 }
 
-function ShipmentsView({
-  pendingShipments,
+type OperationsStatus =
+  | "all"
+  | "shipping"
+  | "collecting"
+  | "confirming"
+  | "overdue"
+
+type DriverFilter = string // "all" | "unassigned" | <driverId>
+
+function OperationsView({
+  actionRequiredOrders,
+  today,
   onEdit,
   onDelete,
+  onConfirmPayment,
   onMarkDelivered,
+  onResetDelivery,
+  onSelectCustomer,
 }: {
-  pendingShipments: OrderDoc[]
+  actionRequiredOrders: OrderDoc[]
+  today: Date
   onEdit: (order: OrderDoc) => void
   onDelete: (id: string) => void
+  onConfirmPayment: (order: OrderDoc) => void
   onMarkDelivered: (order: OrderDoc) => void
+  onResetDelivery: (id: string) => void
+  onSelectCustomer: (name: string) => void
 }) {
+  const [statusFilter, setStatusFilter] = useState<OperationsStatus>("all")
+  const [driverFilter, setDriverFilter] = useState<DriverFilter>("all")
+  const [showBackorder, setShowBackorder] = useState(false)
+
   const driverName = (driverId: string | null) => deliveryPersonLabel(driverId)
+  const paymentMethodLabel = (method: OrderPaymentMethod | null) =>
+    paymentMethodOptions.find((opt) => opt.value === method)?.label ?? ""
 
-  const aggregated = useMemo(() => aggregatePendingItems(pendingShipments), [pendingShipments])
-  const totalProductTypes = aggregated.length
-  const uniqueCustomers = useMemo(
-    () => new Set(pendingShipments.map((o) => o.customerName)).size,
+  const driverOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const o of actionRequiredOrders) {
+      if (o.driverId && o.driverId.trim()) set.add(o.driverId.trim())
+    }
+    return Array.from(set).sort()
+  }, [actionRequiredOrders])
+
+  // Counts feed the chip badges. Recomputed alongside the underlying list so
+  // the chip totals always agree with what the filter would produce.
+  const counts = useMemo(() => {
+    let shipping = 0
+    let collecting = 0
+    let confirming = 0
+    let overdue = 0
+    for (const order of actionRequiredOrders) {
+      if (!order.deliveryDate) shipping += 1
+      if (order.paymentStatus === "unpaid") collecting += 1
+      if (order.paymentStatus === "pending_confirmation") confirming += 1
+      if (
+        order.paymentStatus !== "paid" &&
+        daysBetween(today, order.orderDate) >= 7
+      ) {
+        overdue += 1
+      }
+    }
+    return {
+      total: actionRequiredOrders.length,
+      shipping,
+      collecting,
+      confirming,
+      overdue,
+    }
+  }, [actionRequiredOrders, today])
+
+  const pendingShipments = useMemo(
+    () => actionRequiredOrders.filter((o) => !o.deliveryDate),
+    [actionRequiredOrders],
+  )
+  const aggregated = useMemo(
+    () => aggregatePendingItems(pendingShipments),
     [pendingShipments],
   )
 
-  // FIFO 排序：愈早下單的愈優先出貨
+  const filteredOrders = useMemo(() => {
+    const matchStatus = (order: OrderDoc) => {
+      switch (statusFilter) {
+        case "shipping":
+          return !order.deliveryDate
+        case "collecting":
+          return order.paymentStatus === "unpaid"
+        case "confirming":
+          return order.paymentStatus === "pending_confirmation"
+        case "overdue":
+          return (
+            order.paymentStatus !== "paid" &&
+            daysBetween(today, order.orderDate) >= 7
+          )
+        default:
+          return true
+      }
+    }
+    const matchDriver = (order: OrderDoc) => {
+      if (driverFilter === "all") return true
+      if (driverFilter === "unassigned") return !order.driverId || !order.driverId.trim()
+      return (order.driverId ?? "").trim() === driverFilter
+    }
+    return actionRequiredOrders.filter((order) => matchStatus(order) && matchDriver(order))
+  }, [actionRequiredOrders, statusFilter, driverFilter, today])
+
+  // FIFO so the oldest pending order surfaces first; mirrors the previous
+  // 出貨 view's expectation that aging orders rise to the top.
   const sortedOrders = useMemo(
-    () => [...pendingShipments].sort((a, b) => a.orderDate.getTime() - b.orderDate.getTime()),
-    [pendingShipments],
+    () => [...filteredOrders].sort((a, b) => a.orderDate.getTime() - b.orderDate.getTime()),
+    [filteredOrders],
   )
-
-  const today = useMemo(() => new Date(), [])
 
   const exportColumns: ExportColumn<OrderDoc>[] = [
     { key: "customer", label: "客戶", getValue: (o) => o.customerName },
@@ -2041,10 +2045,21 @@ function ShipmentsView({
     { key: "orderDate", label: "下單日", getValue: (o) => o.orderDate },
     { key: "driver", label: "送貨人員", getValue: (o) => driverName(o.driverId) },
     {
+      key: "deliveryStatus",
+      label: "出貨狀態",
+      getValue: (o) => (o.deliveryDate ? "已出貨" : "未出貨"),
+    },
+    {
       key: "paymentStatus",
       label: "收款",
       getValue: (o) => o.paymentStatus,
       formatText: (o) => paymentStatusLabel[o.paymentStatus],
+    },
+    {
+      key: "paymentMethod",
+      label: "付款方式",
+      getValue: (o) => paymentMethodLabel(o.paymentMethod),
+      defaultSelected: false,
     },
     {
       key: "waited",
@@ -2054,108 +2069,202 @@ function ShipmentsView({
     },
   ]
 
+  const chips: Array<{
+    key: OperationsStatus
+    label: string
+    count: number
+    tone?: "danger"
+  }> = [
+    { key: "all", label: "全部待辦", count: counts.total },
+    { key: "shipping", label: "待出貨", count: counts.shipping },
+    { key: "collecting", label: "待收款", count: counts.collecting },
+    { key: "confirming", label: "待確認入帳", count: counts.confirming },
+    { key: "overdue", label: "久未收 ≥7天", count: counts.overdue, tone: "danger" },
+  ]
+
+  const summaryStats: ReadonlyArray<{
+    label: string
+    value: string
+    icon: typeof Coins
+    accent?: "danger"
+  }> = [
+    { label: "需處理訂單", value: `${counts.total} 筆`, icon: ClipboardList },
+    { label: "待出貨", value: `${counts.shipping} 筆`, icon: Truck },
+    { label: "待收款", value: `${counts.collecting} 筆`, icon: CreditCard },
+    {
+      label: "久未收 ≥7天",
+      value: `${counts.overdue} 筆`,
+      icon: AlertTriangle,
+      accent: counts.overdue > 0 ? "danger" : undefined,
+    },
+  ]
+
   return (
     <div className="flex flex-col gap-5">
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Package />
-            待備商品總覽
-          </CardTitle>
-          <CardAction>
-            <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-              <Badge variant="secondary">
-                {pendingShipments.length} 筆訂單
-              </Badge>
-              <Badge variant="secondary">{uniqueCustomers} 位客戶</Badge>
-              <Badge variant="secondary">{totalProductTypes} 樣商品</Badge>
-            </div>
-          </CardAction>
-        </CardHeader>
-        <CardContent>
-          {aggregated.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 py-10 text-center">
-              <div className="flex size-12 items-center justify-center rounded-full bg-chart-1/10 text-chart-1">
-                <CheckCircle2 />
-              </div>
-              <p className="font-medium">目前沒有待備商品</p>
-              <p className="text-sm text-muted-foreground">所有訂單都已安排出貨</p>
-            </div>
-          ) : (
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {aggregated.map((item) => (
-                <div
-                  key={`${item.productName}-${item.spec}`}
-                  className="flex flex-col gap-2 rounded-lg border bg-muted/30 p-3 transition-colors hover:bg-muted/50"
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {summaryStats.map((stat) => (
+          <KpiCard key={stat.label} item={stat} />
+        ))}
+      </section>
+
+      {pendingShipments.length > 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Package />
+              待備商品總覽
+            </CardTitle>
+            <CardAction>
+              <div className="flex items-center gap-2">
+                <span className="hidden text-xs text-muted-foreground sm:inline">
+                  {pendingShipments.length} 筆待出貨 · {aggregated.length} 樣商品
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowBackorder((prev) => !prev)}
                 >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate font-medium leading-tight">{item.productName}</div>
-                      {item.spec ? (
-                        <div className="truncate text-xs text-muted-foreground">{item.spec}</div>
-                      ) : null}
+                  {showBackorder ? "收合" : "展開"}
+                </Button>
+              </div>
+            </CardAction>
+          </CardHeader>
+          {showBackorder ? (
+            <CardContent>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                {aggregated.map((item) => (
+                  <div
+                    key={`${item.productName}-${item.spec}`}
+                    className="flex flex-col gap-2 rounded-lg border bg-muted/30 p-3 transition-colors hover:bg-muted/50"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate font-medium leading-tight">
+                          {item.productName}
+                        </div>
+                        {item.spec ? (
+                          <div className="truncate text-xs text-muted-foreground">
+                            {item.spec}
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                        <Package className="size-4" />
+                      </div>
                     </div>
-                    <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                      <Package className="size-4" />
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-3xl font-bold tabular-nums leading-none">
+                        {numberFormatter.format(item.totalQuantity)}
+                      </span>
+                      <span className="text-xs text-muted-foreground">件 / 套</span>
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {item.orderCount} 筆訂單 ·{" "}
+                      {item.customers.slice(0, 2).join("、")}
+                      {item.customers.length > 2
+                        ? ` 等 ${item.customers.length} 位`
+                        : ""}
                     </div>
                   </div>
-                  <div className="flex items-baseline gap-1.5">
-                    <span className="text-3xl font-bold tabular-nums leading-none">
-                      {numberFormatter.format(item.totalQuantity)}
-                    </span>
-                    <span className="text-xs text-muted-foreground">件 / 套</span>
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    {item.orderCount} 筆訂單　·
-                    {item.customers.slice(0, 2).join("、")}
-                    {item.customers.length > 2 ? ` 等 ${item.customers.length} 位` : ""}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+                ))}
+              </div>
+            </CardContent>
+          ) : null}
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Truck />
-            訂單明細
-          </CardTitle>
+          <CardTitle>訂單作業</CardTitle>
           <CardAction>
-            <span className="text-xs text-muted-foreground">依下單時間排序（最舊優先）</span>
+            <span className="text-xs text-muted-foreground">FIFO，最舊優先</span>
           </CardAction>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-wrap gap-1.5">
+              {chips.map((chip) => (
+                <Button
+                  key={chip.key}
+                  type="button"
+                  size="sm"
+                  variant={statusFilter === chip.key ? "default" : "outline"}
+                  onClick={() => setStatusFilter(chip.key)}
+                  className={cn(
+                    chip.tone === "danger" &&
+                      statusFilter !== chip.key &&
+                      "border-destructive/40 text-destructive",
+                  )}
+                >
+                  {chip.label}
+                  <Badge variant="secondary" className="ml-1.5">
+                    {chip.count}
+                  </Badge>
+                </Button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2 sm:ml-auto">
+              <Label className="text-xs text-muted-foreground">送貨人員</Label>
+              <Select
+                value={driverFilter}
+                onValueChange={(value) => {
+                  if (value) setDriverFilter(value)
+                }}
+              >
+                <SelectTrigger className="w-40">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value="all">全部</SelectItem>
+                    <SelectItem value="unassigned">未指派</SelectItem>
+                    {driverOptions.map((label) => (
+                      <SelectItem key={label} value={label}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
           <ExportBar
             rows={sortedOrders}
             columns={exportColumns}
-            filename="待出貨訂單"
-            title="待出貨訂單"
+            filename="訂單作業"
+            title="訂單作業"
           />
+
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-[140px]">客戶</TableHead>
+                <TableHead className="w-[150px]">客戶</TableHead>
                 <TableHead>訂單品項</TableHead>
-                <TableHead className="text-right">訂單金額</TableHead>
-                <TableHead>下單日</TableHead>
-                <TableHead>送貨人員</TableHead>
+                <TableHead className="text-right">金額</TableHead>
+                <TableHead>下單 / 等候</TableHead>
+                <TableHead>出貨</TableHead>
                 <TableHead>收款</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {sortedOrders.length === 0 ? (
-                <EmptyRow colSpan={7} text="目前沒有待出貨訂單。" />
+                <EmptyRow colSpan={7} text="目前沒有符合條件的訂單。" />
               ) : (
                 sortedOrders.map((order) => {
                   const waited = daysBetween(today, order.orderDate)
-                  const urgent = waited >= 7
+                  const urgent =
+                    order.paymentStatus !== "paid" && waited >= 7
                   return (
                     <TableRow key={order.id} className="align-top">
-                      <TableCell className="py-3 font-medium">{order.customerName}</TableCell>
+                      <TableCell className="py-3 font-medium">
+                        <CustomerNameButton
+                          name={order.customerName}
+                          onSelect={onSelectCustomer}
+                        />
+                      </TableCell>
                       <TableCell className="py-3">
                         <div className="flex flex-col gap-1">
                           {order.items.length === 0 ? (
@@ -2189,14 +2298,33 @@ function ShipmentsView({
                           <span
                             className={cn(
                               "text-xs",
-                              urgent ? "font-medium text-destructive" : "text-muted-foreground",
+                              urgent
+                                ? "font-medium text-destructive"
+                                : "text-muted-foreground",
                             )}
                           >
                             {waited === 0 ? "今日" : `已等 ${waited} 天`}
                           </span>
                         </div>
                       </TableCell>
-                      <TableCell className="py-3">{driverName(order.driverId)}</TableCell>
+                      <TableCell className="py-3">
+                        {order.deliveryDate ? (
+                          <div className="flex flex-col gap-0.5">
+                            <StatusBadge tone="default">已送達</StatusBadge>
+                            <span className="text-xs text-muted-foreground">
+                              {driverName(order.driverId)} ·{" "}
+                              {formatDate(order.deliveryDate)}
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="flex flex-col gap-0.5">
+                            <StatusBadge tone="warning">待出貨</StatusBadge>
+                            <span className="text-xs text-muted-foreground">
+                              {driverName(order.driverId)}
+                            </span>
+                          </div>
+                        )}
+                      </TableCell>
                       <TableCell className="py-3">
                         <PaymentStatusBadge status={order.paymentStatus} />
                       </TableCell>
@@ -2205,7 +2333,21 @@ function ShipmentsView({
                           order={order}
                           onEdit={onEdit}
                           onDelete={onDelete}
-                          onMarkDelivered={() => onMarkDelivered(order)}
+                          onConfirmPayment={
+                            order.paymentStatus === "pending_confirmation"
+                              ? () => onConfirmPayment(order)
+                              : undefined
+                          }
+                          onMarkDelivered={
+                            order.deliveryDate
+                              ? undefined
+                              : () => onMarkDelivered(order)
+                          }
+                          onResetDelivery={
+                            order.deliveryDate
+                              ? () => onResetDelivery(order.id)
+                              : undefined
+                          }
                         />
                       </TableCell>
                     </TableRow>
@@ -2220,93 +2362,269 @@ function ShipmentsView({
   )
 }
 
-function AnalyticsView({
+type CustomerStat = {
+  name: string
+  customerId: string | null
+  orderCount: number
+  paidAmount: number
+  outstandingAmount: number
+  lastOrder: Date | null
+  hasOpenAction: boolean
+}
+
+function normalizeCustomerKey(name: string) {
+  return name.trim().toLocaleLowerCase().replace(/\s+/g, "")
+}
+
+function buildCustomerStats(orders: OrderDoc[], customers: UserDoc[]): CustomerStat[] {
+  const map = new Map<string, CustomerStat>()
+  // Seed with Users docs first so customers with zero orders still appear in
+  // the directory. Orders then upsert / enrich each entry.
+  for (const u of customers) {
+    const key = normalizeCustomerKey(u.displayName)
+    if (!key) continue
+    map.set(key, {
+      name: u.displayName,
+      customerId: u.id,
+      orderCount: 0,
+      paidAmount: 0,
+      outstandingAmount: 0,
+      lastOrder: null,
+      hasOpenAction: false,
+    })
+  }
+  for (const o of orders) {
+    const name = o.customerName.trim()
+    if (!name) continue
+    const key = normalizeCustomerKey(name)
+    const existing = map.get(key) ?? {
+      name,
+      customerId: o.customerId || null,
+      orderCount: 0,
+      paidAmount: 0,
+      outstandingAmount: 0,
+      lastOrder: null,
+      hasOpenAction: false,
+    }
+    if (!existing.customerId && o.customerId) existing.customerId = o.customerId
+    existing.orderCount += 1
+    if (o.paymentStatus === "paid") existing.paidAmount += o.totalAmount
+    else existing.outstandingAmount += o.totalAmount
+    if (o.paymentStatus !== "paid" || !o.deliveryDate) existing.hasOpenAction = true
+    if (!existing.lastOrder || o.orderDate > existing.lastOrder) {
+      existing.lastOrder = o.orderDate
+    }
+    map.set(key, existing)
+  }
+  return Array.from(map.values()).sort((a, b) => {
+    if (b.outstandingAmount !== a.outstandingAmount) {
+      return b.outstandingAmount - a.outstandingAmount
+    }
+    if (b.paidAmount !== a.paidAmount) return b.paidAmount - a.paidAmount
+    return a.name.localeCompare(b.name, "zh-Hant")
+  })
+}
+
+function CustomersView({
   orders,
-  dashboard,
-  paymentColors,
+  users,
+  today,
+  onSelectCustomer,
 }: {
   orders: OrderDoc[]
-  dashboard: DashboardShape
-  paymentColors: string[]
+  users: UserDoc[]
+  today: Date
+  onSelectCustomer: (name: string) => void
 }) {
-  const stateBuckets: DerivedOrderState[] = ["進行中", "待收款", "已完成"]
+  const customerUsers = useMemo(
+    () => users.filter((u) => u.role === "customer"),
+    [users],
+  )
+  const stats = useMemo(
+    () => buildCustomerStats(orders, customerUsers),
+    [orders, customerUsers],
+  )
+  const [search, setSearch] = useState("")
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLocaleLowerCase()
+    if (!q) return stats
+    return stats.filter((s) => s.name.toLocaleLowerCase().includes(q))
+  }, [stats, search])
+
+  const totalCustomers = stats.length
+  const withOutstanding = stats.filter((s) => s.outstandingAmount > 0).length
+  const totalOutstanding = stats.reduce(
+    (sum, s) => sum + s.outstandingAmount,
+    0,
+  )
+
+  const exportColumns: ExportColumn<CustomerStat>[] = [
+    { key: "name", label: "客戶名稱", getValue: (s) => s.name },
+    { key: "orderCount", label: "訂單筆數", getValue: (s) => s.orderCount },
+    { key: "paidAmount", label: "累積已收", getValue: (s) => s.paidAmount },
+    {
+      key: "outstandingAmount",
+      label: "目前未收",
+      getValue: (s) => s.outstandingAmount,
+    },
+    {
+      key: "lastOrder",
+      label: "最近訂單",
+      getValue: (s) => s.lastOrder,
+    },
+  ]
+
+  const kpis: KpiItem[] = [
+    {
+      label: "總客戶數",
+      value: `${numberFormatter.format(totalCustomers)} 位`,
+      icon: Users,
+    },
+    {
+      label: "有未收客戶",
+      value: `${withOutstanding} 位`,
+      icon: AlertTriangle,
+      accent: withOutstanding > 0 ? "danger" : undefined,
+    },
+    {
+      label: "客戶累計未收",
+      value: money(totalOutstanding),
+      icon: CreditCard,
+    },
+  ]
 
   return (
-    <div className="grid gap-5 xl:grid-cols-[0.9fr_1.1fr]">
-      <Card>
-        <CardHeader>
-          <CardTitle>付款方式分析（已結清）</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-5">
-          {dashboard.paymentMethodStats.map((item, index) => {
-            const percent =
-              dashboard.paymentMethodTotal > 0
-                ? Math.round((item.amount / dashboard.paymentMethodTotal) * 100)
-                : 0
-            return (
-              <div key={item.method} className="flex flex-col gap-2">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="flex items-center gap-2">
-                    <span
-                      className="size-3 rounded-full"
-                      style={{ backgroundColor: paymentColors[index] }}
-                    />
-                    {item.label}
-                  </span>
-                  <span className="font-medium tabular-nums">{money(item.amount)}</span>
-                </div>
-                <Progress value={percent}>
-                  <ProgressTrack>
-                    <ProgressIndicator style={{ backgroundColor: paymentColors[index] }} />
-                  </ProgressTrack>
-                </Progress>
-              </div>
-            )
-          })}
-          {dashboard.paymentMethodTotal === 0 ? (
-            <span className="text-sm text-muted-foreground">尚無已結清訂單可供分析。</span>
-          ) : null}
-        </CardContent>
-      </Card>
+    <div className="flex flex-col gap-5">
+      <section className="grid gap-3 sm:grid-cols-3">
+        {kpis.map((item) => (
+          <KpiCard key={item.label} item={item} />
+        ))}
+      </section>
 
       <Card>
         <CardHeader>
-          <CardTitle>訂單狀態總覽</CardTitle>
+          <CardTitle>客戶名冊</CardTitle>
+          <CardAction>
+            <div className="relative w-56">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="搜尋客戶名稱"
+                className="pl-8"
+              />
+            </div>
+          </CardAction>
         </CardHeader>
-        <CardContent className="grid gap-2 sm:grid-cols-3">
-          {stateBuckets.map((state) => {
-            const count = orders.filter((order) => deriveState(order) === state).length
-            return (
-              <div
-                key={state}
-                className="flex items-center justify-between rounded-lg border px-3 py-2.5 text-sm"
-              >
-                <span>{state}</span>
-                <span className="font-semibold tabular-nums">{count}</span>
-              </div>
-            )
-          })}
+        <CardContent className="flex flex-col gap-4">
+          <ExportBar
+            rows={filtered}
+            columns={exportColumns}
+            filename="客戶名冊"
+            title="客戶名冊"
+          />
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>客戶</TableHead>
+                <TableHead className="text-right">訂單筆數</TableHead>
+                <TableHead className="text-right">累積已收</TableHead>
+                <TableHead className="text-right">目前未收</TableHead>
+                <TableHead>最近訂單</TableHead>
+                <TableHead className="text-right">歷史</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filtered.length === 0 ? (
+                <EmptyRow colSpan={6} text="沒有符合的客戶。" />
+              ) : (
+                filtered.map((s) => {
+                  const lastLabel = s.lastOrder
+                    ? isSameDay(s.lastOrder, today)
+                      ? "今日"
+                      : formatDate(s.lastOrder)
+                    : "—"
+                  return (
+                    <TableRow key={`${s.name}-${s.customerId ?? ""}`}>
+                      <TableCell className="font-medium">
+                        <CustomerNameButton
+                          name={s.name}
+                          onSelect={onSelectCustomer}
+                        />
+                        {s.hasOpenAction ? (
+                          <Badge variant="secondary" className="ml-2 text-[10px]">
+                            進行中
+                          </Badge>
+                        ) : null}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {numberFormatter.format(s.orderCount)}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums text-muted-foreground">
+                        {money(s.paidAmount)}
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "text-right font-medium tabular-nums",
+                          s.outstandingAmount > 0 && "text-destructive",
+                        )}
+                      >
+                        {money(s.outstandingAmount)}
+                      </TableCell>
+                      <TableCell>{lastLabel}</TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => onSelectCustomer(s.name)}
+                        >
+                          <Search data-icon="inline-start" />
+                          查看歷史
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })
+              )}
+            </TableBody>
+          </Table>
         </CardContent>
       </Card>
     </div>
   )
 }
 
-function AlertsView({
-  stalestUnpaid,
-  today,
+function InsightsView({
   orders,
   products,
   users,
+  dashboard,
+  paymentColors,
+  today,
+  onSelectCustomer,
   onNavigate,
 }: {
-  stalestUnpaid: OrderDoc[]
-  today: Date
   orders: OrderDoc[]
   products: ProductDoc[]
   users: UserDoc[]
+  dashboard: DashboardShape
+  paymentColors: string[]
+  today: Date
+  onSelectCustomer: (name: string) => void
   onNavigate: (view: string) => void
 }) {
+  const stateBuckets: DerivedOrderState[] = ["進行中", "待收款", "已完成"]
+
+  const topOverdueCustomers = useMemo(() => {
+    const entries: Array<{ name: string; amount: number }> = []
+    for (const [name, amount] of Object.entries(dashboard.overdueByCustomer)) {
+      entries.push({ name, amount })
+    }
+    return entries.sort((a, b) => b.amount - a.amount).slice(0, 5)
+  }, [dashboard.overdueByCustomer])
+
   return (
     <div className="flex flex-col gap-5">
       <AIAdvisorPanel
@@ -2317,44 +2635,352 @@ function AlertsView({
         onNavigate={(view) => onNavigate(view)}
       />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>久未收款明細</CardTitle>
-        </CardHeader>
-        <CardContent>
+      <div className="grid gap-5 xl:grid-cols-[0.9fr_1.1fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle>付款方式分析（已結清）</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-5">
+            {dashboard.paymentMethodStats.map((item, index) => {
+              const percent =
+                dashboard.paymentMethodTotal > 0
+                  ? Math.round(
+                      (item.amount / dashboard.paymentMethodTotal) * 100,
+                    )
+                  : 0
+              return (
+                <div key={item.method} className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="flex items-center gap-2">
+                      <span
+                        className="size-3 rounded-full"
+                        style={{ backgroundColor: paymentColors[index] }}
+                      />
+                      {item.label}
+                    </span>
+                    <span className="font-medium tabular-nums">
+                      {money(item.amount)}
+                    </span>
+                  </div>
+                  <Progress value={percent}>
+                    <ProgressTrack>
+                      <ProgressIndicator
+                        style={{ backgroundColor: paymentColors[index] }}
+                      />
+                    </ProgressTrack>
+                  </Progress>
+                </div>
+              )
+            })}
+            {dashboard.paymentMethodTotal === 0 ? (
+              <span className="text-sm text-muted-foreground">
+                尚無已結清訂單可供分析。
+              </span>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>訂單狀態總覽</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-2 sm:grid-cols-3">
+            {stateBuckets.map((state) => {
+              const count = orders.filter(
+                (order) => deriveState(order) === state,
+              ).length
+              return (
+                <div
+                  key={state}
+                  className="flex items-center justify-between rounded-lg border px-3 py-2.5 text-sm"
+                >
+                  <span className="flex items-center gap-2">
+                    <PackageCheck />
+                    {state}
+                  </span>
+                  <span className="font-semibold tabular-nums">
+                    {numberFormatter.format(count)}
+                  </span>
+                </div>
+              )
+            })}
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-5 xl:grid-cols-[1.4fr_1fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle>久未收款明細 (≥ 7 天)</CardTitle>
+            <CardAction>
+              <Badge variant="secondary">
+                {dashboard.stalestUnpaid.length} 筆
+              </Badge>
+            </CardAction>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>客戶名稱</TableHead>
+                  <TableHead>品項</TableHead>
+                  <TableHead className="text-right">未收金額</TableHead>
+                  <TableHead>距今</TableHead>
+                  <TableHead>狀態</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {dashboard.stalestUnpaid.length === 0 ? (
+                  <EmptyRow colSpan={5} text="目前沒有久未收款訂單。" />
+                ) : (
+                  dashboard.stalestUnpaid.map((order) => (
+                    <TableRow key={order.id}>
+                      <TableCell className="font-medium">
+                        <CustomerNameButton
+                          name={order.customerName}
+                          onSelect={onSelectCustomer}
+                        />
+                      </TableCell>
+                      <TableCell>{summarizeItems(order.items)}</TableCell>
+                      <TableCell className="text-right font-medium tabular-nums">
+                        {money(order.totalAmount)}
+                      </TableCell>
+                      <TableCell>
+                        {daysBetween(today, order.orderDate)} 天
+                      </TableCell>
+                      <TableCell>
+                        <PaymentStatusBadge status={order.paymentStatus} />
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <AlertTriangle />
+              累積未收排行
+            </CardTitle>
+            <CardAction>
+              <Badge variant="secondary">前 {topOverdueCustomers.length}</Badge>
+            </CardAction>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            {topOverdueCustomers.length === 0 ? (
+              <span className="text-sm text-muted-foreground">
+                目前沒有累積未收的客戶。
+              </span>
+            ) : (
+              topOverdueCustomers.map((row, index) => {
+                const max = topOverdueCustomers[0].amount || 1
+                const percent = Math.round((row.amount / max) * 100)
+                return (
+                  <div key={row.name} className="flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between gap-3 text-sm">
+                      <button
+                        type="button"
+                        className="flex items-center gap-2 text-left font-medium underline-offset-4 hover:underline"
+                        onClick={() => onSelectCustomer(row.name)}
+                      >
+                        <span className="inline-flex size-5 items-center justify-center rounded-full bg-muted text-xs tabular-nums">
+                          {index + 1}
+                        </span>
+                        {row.name}
+                      </button>
+                      <span className="font-medium tabular-nums">
+                        {money(row.amount)}
+                      </span>
+                    </div>
+                    <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full bg-destructive/70"
+                        style={{ width: `${percent}%` }}
+                      />
+                    </div>
+                  </div>
+                )
+              })
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  )
+}
+
+function CustomerHistoryDialog({
+  customerName,
+  orders,
+  today,
+  open,
+  onOpenChange,
+  onEdit,
+  onConfirmPayment,
+  onMarkDelivered,
+  onResetDelivery,
+  onDelete,
+}: {
+  customerName: string | null
+  orders: OrderDoc[]
+  today: Date
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onEdit: (order: OrderDoc) => void
+  onConfirmPayment: (order: OrderDoc) => void
+  onMarkDelivered: (order: OrderDoc) => void
+  onResetDelivery: (id: string) => void
+  onDelete: (id: string) => void
+}) {
+  const customerOrders = useMemo(() => {
+    if (!customerName) return [] as OrderDoc[]
+    const key = normalizeCustomerKey(customerName)
+    return orders
+      .filter((o) => normalizeCustomerKey(o.customerName) === key)
+      .sort((a, b) => b.orderDate.getTime() - a.orderDate.getTime())
+  }, [orders, customerName])
+
+  const summary = useMemo(() => {
+    let totalAmount = 0
+    let paidAmount = 0
+    let outstandingAmount = 0
+    let firstOrder: Date | null = null
+    let lastOrder: Date | null = null
+    for (const o of customerOrders) {
+      totalAmount += o.totalAmount
+      if (o.paymentStatus === "paid") paidAmount += o.totalAmount
+      else outstandingAmount += o.totalAmount
+      if (!firstOrder || o.orderDate < firstOrder) firstOrder = o.orderDate
+      if (!lastOrder || o.orderDate > lastOrder) lastOrder = o.orderDate
+    }
+    return { totalAmount, paidAmount, outstandingAmount, firstOrder, lastOrder }
+  }, [customerOrders])
+
+  if (!customerName) return null
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="!max-w-4xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Users />
+            {customerName}
+          </DialogTitle>
+          <DialogDescription>
+            共 {customerOrders.length} 筆訂單，第一筆：
+            {summary.firstOrder ? formatDate(summary.firstOrder) : "—"}，最近：
+            {summary.lastOrder ? formatDate(summary.lastOrder) : "—"}。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-2 sm:grid-cols-3">
+          <div className="rounded-lg border bg-muted/40 p-3">
+            <div className="text-xs text-muted-foreground">累積營收</div>
+            <div className="text-lg font-semibold tabular-nums">
+              {money(summary.totalAmount)}
+            </div>
+          </div>
+          <div className="rounded-lg border bg-muted/40 p-3">
+            <div className="text-xs text-muted-foreground">已結清</div>
+            <div className="text-lg font-semibold tabular-nums">
+              {money(summary.paidAmount)}
+            </div>
+          </div>
+          <div
+            className={cn(
+              "rounded-lg border p-3",
+              summary.outstandingAmount > 0
+                ? "border-destructive/40 bg-destructive/10 text-destructive"
+                : "bg-muted/40",
+            )}
+          >
+            <div className="text-xs opacity-80">目前未收</div>
+            <div className="text-lg font-semibold tabular-nums">
+              {money(summary.outstandingAmount)}
+            </div>
+          </div>
+        </div>
+
+        <div className="max-h-[55vh] overflow-y-auto rounded-lg border">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>客戶名稱</TableHead>
+                <TableHead>下單日</TableHead>
                 <TableHead>品項</TableHead>
-                <TableHead className="text-right">未收金額</TableHead>
-                <TableHead>距今</TableHead>
-                <TableHead>狀態</TableHead>
+                <TableHead className="text-right">金額</TableHead>
+                <TableHead>出貨</TableHead>
+                <TableHead>收款</TableHead>
+                <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {stalestUnpaid.length === 0 ? (
-                <EmptyRow colSpan={5} text="目前沒有久未收款訂單。" />
+              {customerOrders.length === 0 ? (
+                <EmptyRow colSpan={6} text="這位客戶還沒有訂單。" />
               ) : (
-                stalestUnpaid.map((order) => (
-                  <TableRow key={order.id}>
-                    <TableCell className="font-medium">{order.customerName}</TableCell>
-                    <TableCell>{summarizeItems(order.items)}</TableCell>
-                    <TableCell className="text-right font-medium tabular-nums">
-                      {money(order.totalAmount)}
-                    </TableCell>
-                    <TableCell>{daysBetween(today, order.orderDate)} 天</TableCell>
-                    <TableCell>
-                      <PaymentStatusBadge status={order.paymentStatus} />
-                    </TableCell>
-                  </TableRow>
-                ))
+                customerOrders.map((order) => {
+                  const waited = daysBetween(today, order.orderDate)
+                  return (
+                    <TableRow key={order.id} className="align-top">
+                      <TableCell className="py-3">
+                        <div className="flex flex-col gap-0.5">
+                          <span>{formatDate(order.orderDate)}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {waited === 0 ? "今日" : `${waited} 天前`}
+                          </span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="py-3">
+                        {summarizeItems(order.items)}
+                      </TableCell>
+                      <TableCell className="py-3 text-right font-medium tabular-nums">
+                        {money(order.totalAmount)}
+                      </TableCell>
+                      <TableCell className="py-3">
+                        {order.deliveryDate ? (
+                          <StatusBadge tone="default">已送達</StatusBadge>
+                        ) : (
+                          <StatusBadge tone="warning">待出貨</StatusBadge>
+                        )}
+                      </TableCell>
+                      <TableCell className="py-3">
+                        <PaymentStatusBadge status={order.paymentStatus} />
+                      </TableCell>
+                      <TableCell className="py-3">
+                        <RowActions
+                          order={order}
+                          onEdit={onEdit}
+                          onDelete={onDelete}
+                          onConfirmPayment={
+                            order.paymentStatus === "pending_confirmation"
+                              ? () => onConfirmPayment(order)
+                              : undefined
+                          }
+                          onMarkDelivered={
+                            order.deliveryDate
+                              ? undefined
+                              : () => onMarkDelivered(order)
+                          }
+                          onResetDelivery={
+                            order.deliveryDate
+                              ? () => onResetDelivery(order.id)
+                              : undefined
+                          }
+                        />
+                      </TableCell>
+                    </TableRow>
+                  )
+                })
               )}
             </TableBody>
           </Table>
-        </CardContent>
-      </Card>
-    </div>
+        </div>
+
+        <DialogFooter showCloseButton />
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -2363,11 +2989,13 @@ function CompactOrderTable({
   today,
   onEdit,
   onDelete,
+  onSelectCustomer,
 }: {
   orders: OrderDoc[]
   today: Date
   onEdit: (order: OrderDoc) => void
   onDelete: (id: string) => void
+  onSelectCustomer?: (customerName: string) => void
 }) {
   return (
     <Table>
@@ -2389,7 +3017,12 @@ function CompactOrderTable({
             const state = deriveState(order)
             return (
               <TableRow key={order.id}>
-                <TableCell className="font-medium">{order.customerName}</TableCell>
+                <TableCell className="font-medium">
+                  <CustomerNameButton
+                    name={order.customerName}
+                    onSelect={onSelectCustomer}
+                  />
+                </TableCell>
                 <TableCell>{summarizeItems(order.items)}</TableCell>
                 <TableCell>
                   <StatusBadge tone={stateTone(state)}>{state}</StatusBadge>
@@ -2407,6 +3040,29 @@ function CompactOrderTable({
         )}
       </TableBody>
     </Table>
+  )
+}
+
+// Shared cell renderer: when a customer-history handler is wired, the name
+// becomes a clickable link styled like the row text; otherwise it's plain
+// inline text so the table reads the same in dialogs or export previews.
+function CustomerNameButton({
+  name,
+  onSelect,
+}: {
+  name: string
+  onSelect?: (name: string) => void
+}) {
+  if (!onSelect) return <>{name}</>
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(name)}
+      className="text-left font-medium text-foreground underline-offset-4 hover:underline focus-visible:underline focus-visible:outline-none"
+      title={`查看 ${name} 的歷史訂單`}
+    >
+      {name}
+    </button>
   )
 }
 

@@ -12,7 +12,7 @@ export type SuggestionCategory =
 
 export type SuggestionAction = {
   label: string
-  view: "overview" | "entry" | "payments" | "shipments" | "analytics" | "alerts"
+  view: "overview" | "entry" | "operations" | "customers" | "insights"
 }
 
 export type AISuggestion = {
@@ -96,7 +96,7 @@ function generateLocalSuggestions(
       title: `${longOverdue.length} 筆訂單超過 30 天未收`,
       body: `最久未收：${worst.order.customerName}（${worst.days} 天，${money(worst.order.totalAmount)}）。建議排序催收，優先處理金額大且時間久的客戶。`,
       metric: money(total),
-      action: { label: "前往帳款", view: "payments" },
+      action: { label: "前往訂單作業", view: "operations" },
     })
   }
 
@@ -112,7 +112,7 @@ function generateLocalSuggestions(
       title: `${deliveredUnpaid.length} 筆已出貨但超過 14 天未收款`,
       body: `合計 ${money(total)}。已交貨等於成本已支出，請款週期過長會壓縮現金流，建議建立統一請款日。`,
       metric: money(total),
-      action: { label: "前往帳款", view: "payments" },
+      action: { label: "前往訂單作業", view: "operations" },
     })
   }
 
@@ -125,7 +125,7 @@ function generateLocalSuggestions(
       title: `${pending.length} 筆訂單待出貨`,
       body: `待出貨累積較多，建議檢視配送排程與生產進度。已待超過 7 天的訂單應優先排定出貨日期。`,
       metric: `${pending.length} 筆`,
-      action: { label: "前往出貨", view: "shipments" },
+      action: { label: "前往訂單作業", view: "operations" },
     })
   }
 
@@ -170,7 +170,7 @@ function generateLocalSuggestions(
               ? `主力商品集中度過高，原物料漲價或單一客戶流失將直接衝擊營收。建議擴大其他品項銷售比重。`
               : `為本月主力商品。可考慮推出搭配組合或提早備料，鎖定毛利。`,
           metric: `${share}%`,
-          action: { label: "前往分析", view: "analytics" },
+          action: { label: "前往洞察", view: "insights" },
         })
       }
     }
@@ -199,7 +199,7 @@ function generateLocalSuggestions(
         title: `本月收款率僅 ${rate}%`,
         body: `已開立 ${money(monthBilled)} 但只收回 ${money(monthCollected)}。建議檢討付款條件、減少賒帳比重。`,
         metric: `${rate}%`,
-        action: { label: "前往帳款", view: "payments" },
+        action: { label: "前往訂單作業", view: "operations" },
       })
     }
   }
@@ -330,7 +330,7 @@ const GEMINI_RESPONSE_SCHEMA = {
               label: { type: "string" },
               view: {
                 type: "string",
-                enum: ["overview", "entry", "payments", "shipments", "analytics", "alerts"],
+                enum: ["overview", "entry", "operations", "customers", "insights"],
               },
             },
           },
@@ -429,7 +429,7 @@ ${JSON.stringify(context, null, 2)}
     * positive: 正向訊號（例：收款健康、營收成長）
 - category: 從 cashflow / shipment / customer / product / anomaly / ops 中擇一
 - metric: 量化指標字串（如 "NT$120,000" / "45%" / "3 筆"），選填
-- action: 建議行動，view 必須是 overview/entry/payments/shipments/analytics/alerts 之一，選填
+- action: 建議行動，view 必須是 overview/entry/operations/customers/insights 之一，選填
 
 避免空泛建議，每條都要扣著資料中的具體事實。輸出純 JSON，符合 schema。`
 

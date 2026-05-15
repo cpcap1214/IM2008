@@ -197,7 +197,7 @@ npm run seed:clear
 
 ```
 src/
-├── App.tsx                       # 主畫面：sidebar + 6 個視圖切換
+├── App.tsx                       # 主畫面：sidebar + 5 個視圖切換
 ├── main.tsx                      # entry，包 PreferencesProvider
 ├── index.css                     # Tailwind v4 + 主題 token
 ├── components/
@@ -220,18 +220,19 @@ scripts/
 
 | 視圖 | 內容 |
 |---|---|
-| 總覽 | 8 顆 KPI、付款方式圓環圖、近期訂單、智慧提醒、訂單狀態統計 |
-| 填寫資料 | 訂單表單，支援多品項陣列、Products 下拉自動帶入價格 |
-| 帳款 | 未收款訂單追蹤，含距今天數、出貨狀態，支援匯出 CSV / Excel、列印 PDF |
-| 出貨 | 待出貨訂單清單，依下單時間排序，支援匯出 CSV / Excel、列印 PDF |
-| 分析 | 已收款付款方式百分比、訂單狀態分佈，支援匯出 CSV / Excel、列印 PDF |
-| 提醒 | **AI 智慧建議**（Gemini 或規則引擎）、久未收款明細表 |
+| 總覽 | 8 顆 KPI、付款方式圓環圖、近期訂單（客戶名可點開歷史）、智慧提醒、訂單狀態統計 |
+| 填寫資料 | 訂單表單，支援多品項陣列、Products 下拉自動帶入價格（**規格隨產品名顯示，避免同名 SKU 混淆**）。送出後**留在頁面**並清空表單，方便連續建單 |
+| 訂單作業 | **合併原本的「帳款」+「出貨」**：4 顆 KPI、5 個過濾 chip（全部/待出貨/待收款/待確認/久未收 ≥7 天）、可摺疊「待備商品總覽」、統一表格同時顯示出貨與收款狀態，FIFO 排序，支援匯出 CSV / Excel、列印 PDF |
+| 客戶 | 客戶名冊：搜尋 + 累計營收 / 目前未收 / 最近訂單統計，點客戶名或「查看歷史」開啟單一客戶歷史訂單彈窗（含累積/已結清/目前未收摘要 + 訂單明細與操作） |
+| 洞察 | **合併原本的「分析」+「提醒」**：AI 智慧建議（Gemini 或規則引擎）、付款方式分析、訂單狀態總覽、久未收款明細（客戶名可點開歷史）、**累積未收排行 Top 5 視覺化** |
+
+> 任何表格的客戶名稱都是可點按鈕（hover 會 underline），點下去會打開該客戶的歷史訂單彈窗，可在彈窗內直接執行確認入帳 / 標記送達 / 編輯 / 刪除等操作。
 
 ---
 
 ## AI 智慧建議
 
-「提醒」分頁的核心功能。系統會分析 Firestore 內的訂單、客戶、商品資料，給出 3-7 條客製化營運建議。
+「洞察」分頁的核心功能。系統會分析 Firestore 內的訂單、客戶、商品資料，給出 3-7 條客製化營運建議。
 
 ### 雙引擎切換
 
@@ -258,7 +259,7 @@ scripts/
 | 觸發時機 | 行為 |
 |---|---|
 | 第一次掛載 / 切換 provider | 先讀 localStorage 快取，<24h 直接用、>24h 才呼叫 API |
-| 切回提醒分頁 | 讀快取 → 不呼叫 API |
+| 切回洞察分頁 | 讀快取 → 不呼叫 API |
 | Firestore 資料變動 | **不會自動觸發**（避免燒額度） |
 | 點「重新分析」按鈕 | 強制呼叫 API、覆蓋快取、24 小時計時器歸零 |
 
@@ -281,7 +282,7 @@ if (provider === "gemini") suggestions = await callGemini(...)
 
 ## 資料匯出
 
-「帳款 / 出貨 / 分析」三個視圖頂端皆有 **匯出列**（[ExportBar](src/components/ExportBar.tsx)），可勾選欄位後產出三種格式：
+「訂單作業 / 客戶 / 洞察」三個視圖頂端皆有 **匯出列**（[ExportBar](src/components/ExportBar.tsx)），可勾選欄位後產出三種格式：
 
 | 格式 | 實作 | 行為 |
 |---|---|---|
@@ -291,7 +292,7 @@ if (provider === "gemini") suggestions = await callGemini(...)
 
 ### 操作流程
 
-1. 進入「帳款 / 出貨 / 分析」任一視圖
+1. 進入「訂單作業 / 客戶 / 洞察」任一視圖
 2. 在匯出列勾選要匯出的欄位（可全選 / 清除）
 3. 點「匯出 CSV」/「匯出 Excel」/「列印 PDF」
 
@@ -384,7 +385,7 @@ firebase deploy --only firestore:rules,firestore:indexes
 
 - `Orders` (customerId asc, orderDate desc) — 客戶歷史訂單頁
 - `Orders` (customerName asc, orderDate desc) — dashboard 客戶搜尋
-- `Orders` (paymentStatus asc, orderDate asc) — 帳款分頁的「未收款」/「待確認」過濾
+- `Orders` (paymentStatus asc, orderDate asc) — 訂單作業分頁的「未收款」/「待確認」過濾
 
 ### Gemini API Key 限制
 
@@ -442,7 +443,8 @@ GitHub Actions [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 會在 pus
 - [ ] LINE Login 整合，使用者首次登入自動寫入 Users
 - [ ] LIFF 表單給客戶下單（讀 Products、寫 Orders）
 - [ ] LINE Notify Webhook：未收款 / 待出貨提醒
-- [x] 對帳報表 CSV / Excel / PDF 匯出（帳款・出貨・分析三視圖）
+- [x] 對帳報表 CSV / Excel / PDF 匯出（訂單作業・客戶・洞察三視圖）
+- [x] **儀表板 IA 重整**：把「帳款 + 出貨」合併為「訂單作業」、「分析 + 提醒」合併為「洞察」、新增「客戶」歷史頁與彈窗、表單送出後留頁、產品下拉顯示規格
 - [x] `pending_confirmation` 狀態與「確認入帳」流程
 - [x] `paidAt` 欄位用 `serverTimestamp()` 寫入
 - [x] commit `firestore.rules` / `firestore.indexes.json`（**尚未 deploy**，等 Auth 接好）
