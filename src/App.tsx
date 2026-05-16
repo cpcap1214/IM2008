@@ -136,6 +136,7 @@ type OrderFormData = {
   customerId: string
   customerName: string
   driverId: string
+  deliveryAddress: string
   orderDate: string
   deliveryDate: string
   paymentStatus: OrderPaymentStatus
@@ -246,6 +247,7 @@ function createDefaultForm(today: string): OrderFormData {
     customerId: "",
     customerName: "",
     driverId: "",
+    deliveryAddress: "",
     orderDate: today,
     deliveryDate: "",
     paymentStatus: "unpaid",
@@ -426,6 +428,7 @@ function DashboardApp() {
     const orderDate = parseDate(form.orderDate)
     const deliveryDate = form.deliveryDate ? parseDate(form.deliveryDate) : null
     const driverId = form.driverId.trim() || null
+    const deliveryAddress = form.deliveryAddress.trim()
 
     setBusy(true)
     try {
@@ -435,6 +438,7 @@ function DashboardApp() {
               customerId,
               customerName,
               driverId,
+              deliveryAddress,
               items,
               totalAmount,
               paymentStatus,
@@ -448,6 +452,7 @@ function DashboardApp() {
               customerId,
               customerName,
               driverId,
+              deliveryAddress,
               items,
               totalAmount,
               paymentStatus,
@@ -479,6 +484,7 @@ function DashboardApp() {
       customerId: order.customerId,
       customerName: order.customerName,
       driverId: order.driverId ?? "",
+      deliveryAddress: order.deliveryAddress ?? "",
       orderDate: toLocalDateString(order.orderDate),
       deliveryDate: order.deliveryDate ? toLocalDateString(order.deliveryDate) : "",
       paymentStatus: order.paymentStatus,
@@ -1679,6 +1685,13 @@ function EntryView({
                 </datalist>
               ) : null}
             </Field>
+            <Field label="配送地址 (選填)">
+              <Input
+                value={form.deliveryAddress}
+                onChange={(event) => setField("deliveryAddress", event.target.value)}
+                placeholder="例如：台北市信義區市府路 1 號"
+              />
+            </Field>
             <Field label="訂單日期">
               <Input
                 type="date"
@@ -2287,6 +2300,11 @@ function OperationsView({
                               </div>
                             ))
                           )}
+                          {order.deliveryAddress ? (
+                            <span className="text-xs text-muted-foreground">
+                              🏠 {order.deliveryAddress}
+                            </span>
+                          ) : null}
                         </div>
                       </TableCell>
                       <TableCell className="py-3 text-right font-medium tabular-nums">
@@ -2933,7 +2951,14 @@ function CustomerHistoryDialog({
                         </div>
                       </TableCell>
                       <TableCell className="py-3">
-                        {summarizeItems(order.items)}
+                        <div className="flex flex-col gap-0.5">
+                          <span>{summarizeItems(order.items)}</span>
+                          {order.deliveryAddress ? (
+                            <span className="text-xs text-muted-foreground">
+                              🏠 {order.deliveryAddress}
+                            </span>
+                          ) : null}
+                        </div>
                       </TableCell>
                       <TableCell className="py-3 text-right font-medium tabular-nums">
                         {money(order.totalAmount)}

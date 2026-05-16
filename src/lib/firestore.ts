@@ -60,6 +60,12 @@ export type OrderDoc = {
    * renaming it would require a coordinated two-phase migration.
    */
   driverId: string | null
+  /**
+   * Free-text delivery address as captured by the boss or the LINE bot.
+   * Empty string ("") is the canonical "not provided" value — never null or
+   * undefined — to match the LINE bot's Firestore schema contract.
+   */
+  deliveryAddress: string
   items: OrderItem[]
   totalAmount: number
   paymentStatus: OrderPaymentStatus
@@ -183,6 +189,7 @@ export const orderConverter: FirestoreDataConverter<OrderDoc> = {
       customerId: data.customerId,
       customerName: data.customerName,
       driverId: data.driverId ?? null,
+      deliveryAddress: data.deliveryAddress ?? "",
       items: data.items,
       totalAmount: data.totalAmount,
       paymentStatus: data.paymentStatus,
@@ -202,6 +209,7 @@ export const orderConverter: FirestoreDataConverter<OrderDoc> = {
       customerId: data.customerId ?? "",
       customerName: data.customerName ?? "",
       driverId: data.driverId ?? null,
+      deliveryAddress: typeof data.deliveryAddress === "string" ? data.deliveryAddress : "",
       items: Array.isArray(data.items)
         ? data.items.map((raw: Partial<OrderItem>) => ({
             productName: raw.productName ?? "",
@@ -282,6 +290,9 @@ export async function createOrder(order: Omit<OrderDoc, "id" | "paidAt"> & { pai
     customerId: order.customerId,
     customerName: order.customerName,
     driverId: order.driverId ?? null,
+    // deliveryAddress: always-written field. "" is the valid "not provided"
+    // value to match the LINE bot's Firestore schema contract.
+    deliveryAddress: order.deliveryAddress ?? "",
     items: order.items,
     totalAmount: order.totalAmount,
     paymentStatus: order.paymentStatus,

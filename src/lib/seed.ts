@@ -52,6 +52,7 @@ type SeedOrder = {
   customerId: string
   customerName: string
   driverId: string | null
+  deliveryAddress: string
   items: OrderItem[]
   paymentStatus: "unpaid" | "paid" | "pending_confirmation"
   paymentMethod: "cash" | "transfer" | "check" | null
@@ -68,6 +69,7 @@ function buildSeedOrders(): SeedOrder[] {
       customerName: "永大營造",
       // Not yet delivered → null (boss will fill in via the "標記送達" dialog)
       driverId: null,
+      deliveryAddress: "",
       items: [
         { productName: "化糞池", spec: "FRP 標準型", quantity: 2, unitPrice: 43000, subtotal: 86000 },
       ],
@@ -82,6 +84,7 @@ function buildSeedOrders(): SeedOrder[] {
       customerId: "SEED_USER_CUSTOMER_002",
       customerName: "洪水泥工",
       driverId: "阿凱",
+      deliveryAddress: "",
       items: [
         { productName: "陰井", spec: "30 x 30 cm", quantity: 8, unitPrice: 5250, subtotal: 42000 },
       ],
@@ -96,6 +99,7 @@ function buildSeedOrders(): SeedOrder[] {
       customerId: "SEED_USER_CUSTOMER_003",
       customerName: "金池營造",
       driverId: null,
+      deliveryAddress: "",
       items: [
         { productName: "電線桿", spec: "9 公尺 預力", quantity: 5, unitPrice: 23600, subtotal: 118000 },
       ],
@@ -110,6 +114,7 @@ function buildSeedOrders(): SeedOrder[] {
       customerId: "SEED_USER_CUSTOMER_004",
       customerName: "大成營造",
       driverId: "阿明",
+      deliveryAddress: "",
       items: [
         { productName: "涵管", spec: "60 cm 管徑", quantity: 12, unitPrice: 8000, subtotal: 96000 },
       ],
@@ -124,6 +129,7 @@ function buildSeedOrders(): SeedOrder[] {
       customerId: "SEED_USER_CUSTOMER_001",
       customerName: "永大營造",
       driverId: "阿凱",
+      deliveryAddress: "",
       items: [
         { productName: "其他水泥製品", spec: "依規格報價", quantity: 1, unitPrice: 65000, subtotal: 65000 },
       ],
@@ -171,6 +177,7 @@ export async function seedSampleData() {
       customerId: order.customerId,
       customerName: order.customerName,
       driverId: order.driverId,
+      deliveryAddress: order.deliveryAddress,
       items: order.items,
       paymentStatus: order.paymentStatus,
       paymentMethod: order.paymentMethod,
