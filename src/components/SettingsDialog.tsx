@@ -67,8 +67,9 @@ const FONT_OPTIONS: Array<{ value: FontSize; label: string; sample: string }> = 
 const VIEW_OPTIONS: Array<{ value: DefaultView; label: string }> = [
   { value: "overview", label: "總覽" },
   { value: "entry", label: "填寫資料" },
-  { value: "payments", label: "帳款" },
-  { value: "shipments", label: "出貨" },
+  { value: "operations", label: "訂單作業" },
+  { value: "customers", label: "客戶" },
+  { value: "insights", label: "洞察" },
 ]
 
 export function SettingsDialog({
@@ -159,7 +160,7 @@ export function SettingsDialog({
                       </SelectTrigger>
                       <SelectContent>
                         <SelectGroup>
-                          {(["boss", "driver", "customer"] as ProfileRole[]).map((role) => (
+                          {(["boss", "customer"] as ProfileRole[]).map((role) => (
                             <SelectItem key={role} value={role}>
                               {ROLE_LABEL[role]}
                             </SelectItem>

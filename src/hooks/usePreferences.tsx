@@ -10,8 +10,14 @@ import {
 export type ThemeMode = "light" | "dark" | "system"
 export type FontSize = "small" | "medium" | "large"
 export type AccentColor = "violet" | "teal" | "rose" | "amber" | "slate"
-export type DefaultView = "overview" | "entry" | "payments" | "shipments"
-export type ProfileRole = "boss" | "driver" | "customer"
+export type DefaultView =
+  | "overview"
+  | "entry"
+  | "operations"
+  | "customers"
+  | "insights"
+
+export type ProfileRole = "boss" | "customer"
 
 export type Profile = {
   displayName: string
@@ -41,6 +47,33 @@ const DEFAULT_PREFS: Preferences = {
     phone: "",
     notes: "",
   },
+}
+
+// Legacy view keys we still accept from older localStorage payloads — the
+// navigation was reorganized so payments/shipments collapsed into "operations"
+// and analytics/alerts into "insights". Map on load so the preferences UI
+// never offers retired values again.
+const LEGACY_VIEW_MAP: Record<string, DefaultView> = {
+  payments: "operations",
+  shipments: "operations",
+  analytics: "insights",
+  alerts: "insights",
+}
+
+const ALLOWED_VIEWS: DefaultView[] = [
+  "overview",
+  "entry",
+  "operations",
+  "customers",
+  "insights",
+]
+
+function coerceDefaultView(raw: unknown): DefaultView {
+  if (typeof raw !== "string") return DEFAULT_PREFS.defaultView
+  if (raw in LEGACY_VIEW_MAP) return LEGACY_VIEW_MAP[raw]
+  return (ALLOWED_VIEWS as string[]).includes(raw)
+    ? (raw as DefaultView)
+    : DEFAULT_PREFS.defaultView
 }
 
 const ACCENT_TOKENS: Record<
@@ -99,6 +132,7 @@ function loadPrefs(): Preferences {
     return {
       ...DEFAULT_PREFS,
       ...parsed,
+      defaultView: coerceDefaultView(parsed.defaultView),
       profile: { ...DEFAULT_PREFS.profile, ...(parsed.profile ?? {}) },
     }
   } catch {
@@ -208,6 +242,5 @@ export function usePreferences() {
 
 export const ROLE_LABEL: Record<ProfileRole, string> = {
   boss: "老闆",
-  driver: "司機",
   customer: "客戶",
 }

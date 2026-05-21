@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # Lint runs but is non-gating: this branch carries pre-existing lint
+      # findings in components touched by earlier work that are out of scope
+      # for this PR. Once those are cleared the `continue-on-error` flag below
+      # should be removed so lint becomes a hard gate.
+      - name: Lint
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+        env:
+          # Build needs valid-shaped env vars to satisfy import.meta.env reads,
+          # but the values themselves don't have to be real for `vite build`.
+          VITE_FIREBASE_API_KEY: ci
+          VITE_FIREBASE_AUTH_DOMAIN: ci.firebaseapp.com
+          VITE_FIREBASE_PROJECT_ID: ci
+          VITE_FIREBASE_STORAGE_BUCKET: ci.appspot.com
+          VITE_FIREBASE_MESSAGING_SENDER_ID: "0"
+          VITE_FIREBASE_APP_ID: "1:0:web:ci"
+          VITE_ENABLE_SEED: "false"
