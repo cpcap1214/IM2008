@@ -1538,17 +1538,61 @@ function ShipmentsView({
 
   const today = useMemo(() => new Date(), [])
 
+  const formatOrderDate = (d: Date) => {
+    const y = d.getFullYear()
+    const m = `${d.getMonth() + 1}`.padStart(2, "0")
+    const day = `${d.getDate()}`.padStart(2, "0")
+    return `${y}-${m}-${day}`
+  }
+  const paymentStatusLabel = (status: OrderPaymentStatus) =>
+    status === "paid" ? "已結清" : "未收款"
+  const itemsQuantityText = (items: OrderItem[]) =>
+    items.map((it) => `×${it.quantity}`).join("、")
+
   const exportColumns: ExportColumn<OrderDoc>[] = [
-    { key: "customer", label: "客戶", getValue: (o) => o.customerName },
-    { key: "items", label: "訂單品項", getValue: (o) => summarizeItems(o.items) },
+    {
+      key: "customer",
+      label: "客戶",
+      getValue: (o) => o.customerName,
+      filter: {
+        optionsFor: (rows) => rows.map((r) => r.customerName),
+        matches: (row, selected) => row.customerName === selected,
+      },
+    },
+    {
+      key: "items",
+      label: "訂單品項",
+      getValue: (o) => summarizeItems(o.items),
+      filter: {
+        optionsFor: (rows) => rows.flatMap((r) => r.items.map((it) => it.productName)),
+        matches: (row, selected) => row.items.some((it) => it.productName === selected),
+      },
+    },
+    {
+      key: "quantity",
+      label: "訂單數量",
+      getValue: (o) => itemsQuantityText(o.items),
+    },
     { key: "amount", label: "訂單金額", getValue: (o) => o.totalAmount },
-    { key: "orderDate", label: "下單日", getValue: (o) => o.orderDate },
+    {
+      key: "orderDate",
+      label: "下單日",
+      getValue: (o) => o.orderDate,
+      filter: {
+        optionsFor: (rows) => rows.map((r) => formatOrderDate(r.orderDate)),
+        matches: (row, selected) => formatOrderDate(row.orderDate) === selected,
+      },
+    },
     { key: "driver", label: "司機", getValue: (o) => driverName(o.driverId) },
     {
       key: "paymentStatus",
       label: "收款",
       getValue: (o) => o.paymentStatus,
-      formatText: (o) => (o.paymentStatus === "paid" ? "已結清" : "未收款"),
+      formatText: (o) => paymentStatusLabel(o.paymentStatus),
+      filter: {
+        optionsFor: (rows) => rows.map((r) => paymentStatusLabel(r.paymentStatus)),
+        matches: (row, selected) => paymentStatusLabel(row.paymentStatus) === selected,
+      },
     },
     {
       key: "waited",
@@ -1610,7 +1654,7 @@ function ShipmentsView({
                     <span className="text-xs text-muted-foreground">件 / 套</span>
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    {item.orderCount} 筆訂單　·
+                    {item.orderCount} 筆訂單·
                     {item.customers.slice(0, 2).join("、")}
                     {item.customers.length > 2 ? ` 等 ${item.customers.length} 位` : ""}
                   </div>
