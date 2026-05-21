@@ -900,6 +900,7 @@ function DashboardApp() {
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
       <ConfirmPaymentDialog
+        key={confirmTarget?.id ?? "none"}
         order={confirmTarget}
         open={confirmTarget !== null}
         onOpenChange={(open) => {
@@ -909,6 +910,7 @@ function DashboardApp() {
         busy={busy}
       />
       <ConfirmDeliveryDialog
+        key={deliveryTarget?.id ?? "none"}
         order={deliveryTarget}
         open={deliveryTarget !== null}
         onOpenChange={(open) => {
@@ -1088,12 +1090,8 @@ function ConfirmDeliveryDialog({
   suggestions: string[]
   busy: boolean
 }) {
-  const [label, setLabel] = useState("")
+  const [label, setLabel] = useState(order?.driverId ?? "")
   const listId = "delivery-label-suggestions"
-
-  useEffect(() => {
-    if (open) setLabel(order?.driverId ?? "")
-  }, [open, order?.id, order?.driverId])
 
   if (!order) return null
 
@@ -1164,10 +1162,6 @@ function ConfirmPaymentDialog({
   busy: boolean
 }) {
   const [method, setMethod] = useState<OrderPaymentMethod>("cash")
-
-  useEffect(() => {
-    if (open) setMethod("cash")
-  }, [open, order?.id])
 
   if (!order) return null
 
@@ -2051,11 +2045,49 @@ function OperationsView({
     [filteredOrders],
   )
 
+  const formatOrderDate = (d: Date) => {
+    const y = d.getFullYear()
+    const m = `${d.getMonth() + 1}`.padStart(2, "0")
+    const day = `${d.getDate()}`.padStart(2, "0")
+    return `${y}-${m}-${day}`
+  }
+  const itemsQuantityText = (items: OrderItem[]) =>
+    items.map((it) => `×${it.quantity}`).join("、")
+
   const exportColumns: ExportColumn<OrderDoc>[] = [
-    { key: "customer", label: "客戶", getValue: (o) => o.customerName },
-    { key: "items", label: "訂單品項", getValue: (o) => summarizeItems(o.items) },
+    {
+      key: "customer",
+      label: "客戶",
+      getValue: (o) => o.customerName,
+      filter: {
+        optionsFor: (rows) => rows.map((r) => r.customerName),
+        matches: (row, selected) => row.customerName === selected,
+      },
+    },
+    {
+      key: "items",
+      label: "訂單品項",
+      getValue: (o) => summarizeItems(o.items),
+      filter: {
+        optionsFor: (rows) => rows.flatMap((r) => r.items.map((it) => it.productName)),
+        matches: (row, selected) => row.items.some((it) => it.productName === selected),
+      },
+    },
+    {
+      key: "quantity",
+      label: "訂單數量",
+      getValue: (o) => itemsQuantityText(o.items),
+    },
     { key: "amount", label: "訂單金額", getValue: (o) => o.totalAmount },
-    { key: "orderDate", label: "下單日", getValue: (o) => o.orderDate },
+    {
+      key: "orderDate",
+      label: "下單日",
+      getValue: (o) => o.orderDate,
+      filter: {
+        optionsFor: (rows) => rows.map((r) => formatOrderDate(r.orderDate)),
+        matches: (row, selected) => formatOrderDate(row.orderDate) === selected,
+      },
+    },
     { key: "driver", label: "送貨人員", getValue: (o) => driverName(o.driverId) },
     {
       key: "deliveryStatus",
@@ -2067,6 +2099,10 @@ function OperationsView({
       label: "收款",
       getValue: (o) => o.paymentStatus,
       formatText: (o) => paymentStatusLabel[o.paymentStatus],
+      filter: {
+        optionsFor: (rows) => rows.map((r) => paymentStatusLabel[r.paymentStatus]),
+        matches: (row, selected) => paymentStatusLabel[row.paymentStatus] === selected,
+      },
     },
     {
       key: "paymentMethod",

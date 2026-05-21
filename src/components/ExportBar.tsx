@@ -3,7 +3,22 @@ import { FileSpreadsheet, FileText, Printer } from "lucide-react"
 import * as XLSX from "xlsx"
 
 import { Button } from "@/components/ui/button"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { cn } from "@/lib/utils"
+
+const FILTER_ALL = "__all__"
+
+export type ExportFilter<T> = {
+  optionsFor: (rows: T[]) => string[]
+  matches: (row: T, selected: string) => boolean
+}
 
 export type ExportColumn<T> = {
   key: string
@@ -11,6 +26,7 @@ export type ExportColumn<T> = {
   getValue: (row: T) => string | number | Date | null | undefined
   formatText?: (row: T) => string
   defaultSelected?: boolean
+  filter?: ExportFilter<T>
 }
 
 type ExportBarProps<T> = {
@@ -91,30 +107,80 @@ export function ExportBar<T>({
         columns.filter((col) => col.defaultSelected !== false).map((col) => col.key),
       ),
   )
+  const [filters, setFilters] = useState<Record<string, string>>({})
+
+  const filterableColumns = useMemo(
+    () => columns.filter((col): col is ExportColumn<T> & { filter: ExportFilter<T> } => Boolean(col.filter)),
+    [columns],
+  )
+
+  const filterOptions = useMemo(() => {
+    const map: Record<string, string[]> = {}
+    for (const col of filterableColumns) {
+      const opts = col.filter.optionsFor(rows).filter((v) => v !== "")
+      map[col.key] = Array.from(new Set(opts)).sort((a, b) => a.localeCompare(b, "zh-Hant"))
+    }
+    return map
+  }, [filterableColumns, rows])
+
+  const filteredRows = useMemo(() => {
+    return rows.filter((row) =>
+      filterableColumns.every((col) => {
+        const selectedValue = filters[col.key]
+        if (!selectedValue || selectedValue === FILTER_ALL) return true
+        return col.filter.matches(row, selectedValue)
+      }),
+    )
+  }, [rows, filterableColumns, filters])
 
   const activeColumns = useMemo(
     () => columns.filter((col) => selected.has(col.key)),
     [columns, selected],
   )
 
-  const canExport = rows.length > 0 && activeColumns.length > 0
+  const canExport = filteredRows.length > 0 && activeColumns.length > 0
 
   const toggle = (key: string) => {
     setSelected((current) => {
       const next = new Set(current)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
+      if (next.has(key)) {
+        next.delete(key)
+        // Unchecking the column clears its filter so the export stays consistent
+        setFilters((curFilters) => {
+          if (!curFilters[key] || curFilters[key] === FILTER_ALL) return curFilters
+          const { [key]: _removed, ...rest } = curFilters
+          return rest
+        })
+      } else {
+        next.add(key)
+      }
       return next
     })
   }
 
+  const changeFilter = (key: string, value: string) => {
+    setFilters((current) => ({ ...current, [key]: value }))
+    // Setting a real filter implies the user wants that column visible
+    if (value && value !== FILTER_ALL) {
+      setSelected((current) => {
+        if (current.has(key)) return current
+        const next = new Set(current)
+        next.add(key)
+        return next
+      })
+    }
+  }
+
   const selectAll = () => setSelected(new Set(columns.map((col) => col.key)))
-  const clearAll = () => setSelected(new Set())
+  const clearAll = () => {
+    setSelected(new Set())
+    setFilters({})
+  }
 
   const exportCsv = () => {
     if (!canExport) return
     const header = activeColumns.map((col) => csvEscape(col.label)).join(",")
-    const body = rows
+    const body = filteredRows
       .map((row) =>
         activeColumns.map((col) => csvEscape(valueToText(col, row))).join(","),
       )
@@ -128,7 +194,7 @@ export function ExportBar<T>({
     if (!canExport) return
     const aoa: Array<Array<string | number | Date>> = [
       activeColumns.map((col) => col.label),
-      ...rows.map((row) => activeColumns.map((col) => valueForExcel(col, row))),
+      ...filteredRows.map((row) => activeColumns.map((col) => valueForExcel(col, row))),
     ]
     const sheet = XLSX.utils.aoa_to_sheet(aoa)
     const workbook = XLSX.utils.book_new()
@@ -143,7 +209,7 @@ export function ExportBar<T>({
     const headerCells = activeColumns
       .map((col) => `<th>${escapeHtml(col.label)}</th>`)
       .join("")
-    const bodyRows = rows
+    const bodyRows = filteredRows
       .map((row) => {
         const cells = activeColumns
           .map((col) => `<td>${escapeHtml(valueToText(col, row))}</td>`)
@@ -184,7 +250,7 @@ export function ExportBar<T>({
   </head>
   <body>
     <h1>${escapeHtml(title)}</h1>
-    <div class="meta">列印時間：${escapeHtml(stamp)}　·　共 ${rows.length} 筆</div>
+    <div class="meta">列印時間：${escapeHtml(stamp)}　·　共 ${filteredRows.length} 筆</div>
     <table>
       <thead><tr>${headerCells}</tr></thead>
       <tbody>${bodyRows}</tbody>
@@ -211,38 +277,64 @@ export function ExportBar<T>({
         className,
       )}
     >
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <span className="text-sm font-medium">匯出欄位</span>
-        {columns.map((col) => {
-          const checked = selected.has(col.key)
-          return (
-            <label
-              key={col.key}
-              className="flex cursor-pointer items-center gap-1.5 text-sm"
-            >
-              <input
-                type="checkbox"
-                checked={checked}
-                onChange={() => toggle(col.key)}
-                className="size-3.5 cursor-pointer accent-primary"
-              />
-              <span>{col.label}</span>
-            </label>
-          )
-        })}
-        <div className="ml-auto flex gap-1">
-          <Button type="button" variant="ghost" size="xs" onClick={selectAll}>
-            全選
-          </Button>
-          <Button type="button" variant="ghost" size="xs" onClick={clearAll}>
-            清除
-          </Button>
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium">匯出欄位（可篩選的欄位旁邊有下拉選單）</span>
+          <div className="flex gap-1">
+            <Button type="button" variant="ghost" size="xs" onClick={selectAll}>
+              全選
+            </Button>
+            <Button type="button" variant="ghost" size="xs" onClick={clearAll}>
+              清除
+            </Button>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-x-5 gap-y-2">
+          {columns.map((col) => {
+            const checked = selected.has(col.key)
+            const hasFilter = Boolean(col.filter)
+            const filterValue = filters[col.key] ?? FILTER_ALL
+            const options = filterOptions[col.key] ?? []
+            return (
+              <div key={col.key} className="flex items-center gap-1.5 text-sm">
+                <label className="flex cursor-pointer items-center gap-1.5">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggle(col.key)}
+                    className="size-3.5 cursor-pointer accent-primary"
+                  />
+                  <span>{col.label}</span>
+                </label>
+                {hasFilter ? (
+                  <Select
+                    value={filterValue}
+                    onValueChange={(next) => changeFilter(col.key, next as string)}
+                  >
+                    <SelectTrigger size="sm" className="min-w-24">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value={FILTER_ALL}>全部</SelectItem>
+                        {options.map((opt) => (
+                          <SelectItem key={opt} value={opt}>
+                            {opt}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                ) : null}
+              </div>
+            )
+          })}
         </div>
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="text-xs text-muted-foreground">
-          共 {rows.length} 筆 · 已選 {activeColumns.length} 欄
+          共 {filteredRows.length} / {rows.length} 筆 · 已選 {activeColumns.length} 欄
         </span>
         <div className="flex flex-wrap gap-2">
           <Button
