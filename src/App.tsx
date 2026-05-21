@@ -900,6 +900,7 @@ function DashboardApp() {
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
       <ConfirmPaymentDialog
+        key={confirmTarget?.id ?? "none"}
         order={confirmTarget}
         open={confirmTarget !== null}
         onOpenChange={(open) => {
@@ -909,6 +910,7 @@ function DashboardApp() {
         busy={busy}
       />
       <ConfirmDeliveryDialog
+        key={deliveryTarget?.id ?? "none"}
         order={deliveryTarget}
         open={deliveryTarget !== null}
         onOpenChange={(open) => {
@@ -1088,12 +1090,8 @@ function ConfirmDeliveryDialog({
   suggestions: string[]
   busy: boolean
 }) {
-  const [label, setLabel] = useState("")
+  const [label, setLabel] = useState(order?.driverId ?? "")
   const listId = "delivery-label-suggestions"
-
-  useEffect(() => {
-    if (open) setLabel(order?.driverId ?? "")
-  }, [open, order?.id, order?.driverId])
 
   if (!order) return null
 
@@ -1164,10 +1162,6 @@ function ConfirmPaymentDialog({
   busy: boolean
 }) {
   const [method, setMethod] = useState<OrderPaymentMethod>("cash")
-
-  useEffect(() => {
-    if (open) setMethod("cash")
-  }, [open, order?.id])
 
   if (!order) return null
 
