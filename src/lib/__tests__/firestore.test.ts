@@ -312,6 +312,24 @@ describe("createOrder", () => {
     expect(data.paidAt).toBeNull()
   })
 
+  test("allows dashboard orders without a LINE customerId", async () => {
+    const { createOrder } = await loadModule()
+    await createOrder({
+      customerId: "",
+      customerName: "新店家",
+      driverId: null,
+      items: [],
+      totalAmount: 0,
+      paymentStatus: "unpaid",
+      paymentMethod: null,
+      orderDate: new Date("2026-05-01T00:00:00Z"),
+      deliveryDate: null,
+    })
+    const data = addDocMock.mock.calls[0][1] as Record<string, unknown>
+    expect(data.customerId).toBe("")
+    expect(data.customerName).toBe("新店家")
+  })
+
   test('writes paidAt = serverTimestamp() when paymentStatus = "paid" without explicit paidAt', async () => {
     const { createOrder } = await loadModule()
     await createOrder({

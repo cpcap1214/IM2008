@@ -17,6 +17,7 @@ firebase emulators:start --only firestore
 
 | Actor (custom claim `role`) | Action | Expected |
 |---|---|---|
+| `boss` | `create Orders/<id>` with blank or manual `customerId` | ✅ allowed |
 | `boss` | `update Orders/<id>` (any field) | ✅ allowed |
 | `customer` (own UID == `customerId`) | `create Orders/<id>` | ✅ allowed |
 | `customer` (own UID != `customerId`) | `create Orders/<id>` | ❌ denied |

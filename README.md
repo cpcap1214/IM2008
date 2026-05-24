@@ -161,7 +161,7 @@ npm run seed:clear
 
 | 欄位 | 型態 | 必填 | 說明 |
 |---|---|---|---|
-| `customerId` | string | ✓ | 下單客戶 LINE ID |
+| `customerId` | string | | 下單客戶 LINE ID；dashboard 手動新增、尚未綁定 LINE 的店家可留空字串 |
 | `customerName` | string | ✓ | 客戶名稱（反正規化欄位） |
 | `driverId` | string \| null | ✓ | **送貨人員的自由文字標籤**（例如 "阿明"、車號）。**不是** Users 的 foreign key。`null` ＝**尚未指派**（系統永遠不會寫字串 `"尚未指派"`）。dashboard 從「標記送達」對話框寫入 |
 | `items` | array | ✓ | 訂單品項陣列（見下） |
@@ -377,7 +377,7 @@ firebase deploy --only firestore:rules,firestore:indexes
 |---|---|---|
 | Users | read all + write | 只能讀自己 |
 | Products | read + write | read |
-| Orders | read + write 全部 | 只能 read 自己的、create 時 `customerId` 必須等於 `request.auth.uid`（**customer 不能 update**） |
+| Orders | read + write 全部；可建立未綁定 LINE ID 的手動訂單 | 只能 read 自己的、create 時 `customerId` 必須等於 `request.auth.uid`（**customer 不能 update**） |
 
 ### 索引
 

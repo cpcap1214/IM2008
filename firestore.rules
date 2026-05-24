@@ -25,8 +25,9 @@ service cloud.firestore {
       allow read: if request.auth != null &&
                   (request.auth.token.role == "boss" ||
                    resource.data.customerId == request.auth.uid);
-      allow create: if request.auth.token.role in ["boss", "customer"] &&
-                    request.resource.data.customerId == request.auth.uid;
+      allow create: if request.auth.token.role == "boss" ||
+                    (request.auth.token.role == "customer" &&
+                     request.resource.data.customerId == request.auth.uid);
       // Only boss can flip paymentStatus / set deliveryDate / edit orders.
       allow update: if request.auth.token.role == "boss";
       allow delete: if request.auth.token.role == "boss";

@@ -48,6 +48,10 @@ export type OrderPaymentMethod = "cash" | "transfer" | "check"
 
 export type OrderDoc = {
   id: string
+  /**
+   * Bound LINE UID when the customer is known in `Users`.
+   * Dashboard-created walk-in/manual customers can leave this as "".
+   */
   customerId: string
   customerName: string
   /**

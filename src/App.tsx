@@ -406,9 +406,9 @@ function DashboardApp() {
   const submitOrder = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
-    const customerId = form.customerId.trim()
     const customerName = form.customerName.trim()
-    if (!customerId || !customerName) return
+    if (!customerName) return
+    const customerId = form.customerId.trim()
 
     const items: OrderItem[] = form.items
       .map((row) => ({
@@ -1555,7 +1555,7 @@ function CustomerCombobox({
 
       {showNewHint ? (
         <p className="mt-2 text-xs text-muted-foreground">
-          資料庫沒有相似的客戶，送出後會建立成新客戶。
+          資料庫沒有相似的客戶，可直接用此名稱建立訂單。
         </p>
       ) : null}
     </div>
@@ -1596,6 +1596,7 @@ function EntryView({
   onDismissFlash: () => void
 }) {
   const total = form.items.reduce((sum, row) => sum + rowSubtotal(row), 0)
+  const selectedCustomer = customerSuggestions.find((s) => s.id === form.customerId)
 
   const onPickProduct = (index: number, productId: string) => {
     const product = products.find((p) => p.id === productId)
@@ -1640,23 +1641,30 @@ function EntryView({
             <Field label="客戶名稱">
               <CustomerCombobox
                 value={form.customerName}
-                onValueChange={(next) => setField("customerName", next)}
+                onValueChange={(next) => {
+                  setField("customerName", next)
+                  if (
+                    selectedCustomer &&
+                    selectedCustomer.name.trim() !== next.trim()
+                  ) {
+                    setField("customerId", "")
+                  }
+                }}
                 onPick={(picked) => {
                   setField("customerName", picked.name)
-                  if (picked.id) setField("customerId", picked.id)
+                  setField("customerId", picked.id ?? "")
                 }}
                 suggestions={customerSuggestions}
                 required
                 placeholder="輸入名稱即時搜尋（例如：永大營造）"
               />
             </Field>
-            <Field label="客戶 (LINE ID)">
+            <Field label="客戶 LINE ID（選填）">
               <Input
                 value={form.customerId}
                 onChange={(event) => setField("customerId", event.target.value)}
-                placeholder="U1234567890..."
+                placeholder="可留空，或輸入 U1234567890..."
                 list="customer-options"
-                required
               />
               <datalist id="customer-options">
                 {customers.map((customer) => (
